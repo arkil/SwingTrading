@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "daytrade-backtester"
+version = "0.1.0"
+description = "Config-driven day-trading backtester using Yahoo Finance data"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "pandas>=2.1",
+  "numpy>=1.26",
+  "PyYAML>=6.0",
+  "yfinance>=0.2.40",
+]
+
+[project.scripts]
+dtb = "daytrade_backtester.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
