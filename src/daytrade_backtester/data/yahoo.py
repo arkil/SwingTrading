@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 import pandas as pd
 import yfinance as yf
 
@@ -12,6 +14,8 @@ def _cache_payload(cfg: DataConfig) -> dict:
         "symbol": cfg.symbol,
         "interval": cfg.interval,
         "period": cfg.period,
+        "date_start": cfg.date_start,
+        "date_end": cfg.date_end,
         "timezone": cfg.timezone,
         "session_start": cfg.session_start,
         "session_end": cfg.session_end,
@@ -25,15 +29,31 @@ def load_intraday_bars(cfg: DataConfig) -> pd.DataFrame:
     if cached is not None and not cached.empty:
         return cached
 
-    df = yf.download(
-        tickers=cfg.symbol,
-        period=cfg.period,
-        interval=cfg.interval,
-        auto_adjust=True,
-        progress=False,
-        prepost=False,
-        threads=False,
-    )
+    # Use explicit date range when provided; fall back to period.
+    # yfinance end is exclusive, but config.date_end is documented as inclusive —
+    # add one day so the last requested date is included.
+    if cfg.date_start:
+        yf_end = str(date.fromisoformat(cfg.date_end) + timedelta(days=1)) if cfg.date_end else None
+        df = yf.download(
+            tickers=cfg.symbol,
+            start=cfg.date_start,
+            end=yf_end,
+            interval=cfg.interval,
+            auto_adjust=True,
+            progress=False,
+            prepost=False,
+            threads=False,
+        )
+    else:
+        df = yf.download(
+            tickers=cfg.symbol,
+            period=cfg.period,
+            interval=cfg.interval,
+            auto_adjust=True,
+            progress=False,
+            prepost=False,
+            threads=False,
+        )
 
     if df.empty:
         raise ValueError("No data returned from Yahoo Finance")

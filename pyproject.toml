@@ -13,10 +13,14 @@ dependencies = [
   "numpy>=1.26",
   "PyYAML>=6.0",
   "yfinance>=0.2.40",
+  "alpaca-py>=0.35.0",
+  "python-dotenv>=1.0",
 ]
 
 [project.scripts]
-dtb = "daytrade_backtester.cli:main"
+dtb         = "daytrade_backtester.cli:main"
+dtb-live    = "daytrade_backtester.live.runner:main"
+dtb-pyramid = "daytrade_backtester.live.pyramid_runner:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

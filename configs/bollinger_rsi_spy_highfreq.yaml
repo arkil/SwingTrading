@@ -1,0 +1,69 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  BB + RSI  —  SPY  5-minute  high-frequency variant
+#
+#  CHANGES vs. bollinger_rsi_spy_improved.yaml
+#  - avoid_close_minutes: 60   (was 180) → expands window to 10:00 – 15:00
+#  - require_long_above_sma: false        (was true)  → removes 5-day SMA gate
+#  - cooldown_bars: 1                     (was 3)     → 5-min pause only
+#  - max_trades_per_day: 4               (was 2)
+#
+#  TRADE-OFF
+#  ---------
+#  Win rate drops from ~100% (5 trades) to ~67% (24 trades / 60 days ≈ 12/month)
+#  but trade frequency rises to meet the 20/month target when combined with QQQ.
+#
+#  See bollinger_rsi_qqq_highfreq.yaml for the companion QQQ config.
+# ─────────────────────────────────────────────────────────────────────────────
+
+data:
+  symbol: SPY
+  interval: 5m
+  period: 60d
+  timezone: America/New_York
+  session_start: "09:30"
+  session_end:   "16:00"
+
+strategy:
+  name: bollinger_rsi_reversal
+  params:
+    bb_length: 20
+    bb_std:    2.0
+    rsi_length: 14
+    atr_length: 14
+    adx_length: 14
+    volume_ma_length: 20
+
+    rsi_oversold:   30
+    rsi_overbought: 70
+
+    long_only: true
+    require_reentry_confirmation: true
+    min_rel_volume: 0
+
+    max_adx: 0
+    require_long_above_sma: false
+
+    session_start: "09:30"
+    session_end:   "16:00"
+    avoid_open_minutes:  30
+    avoid_close_minutes: 60    # 10:00 – 15:00 session window
+
+risk:
+  capital_per_trade:    1000
+  option_target_pct:    0.05
+  hold_bars:            6
+  option_leverage:      20.0
+  stop_atr_mult:        0
+  commission_per_trade: 1.0
+  cooldown_bars:        1
+  max_trades_per_day:   4
+  early_exit_bar:       3
+  early_exit_pct:       -0.03
+
+options:
+  provider: synthetic
+  exit_model: underlying
+  dte_target_days: 2
+  otm_steps: 1
+  use_real_prices_for_pnl: false
+  require_real_prices: false

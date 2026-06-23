@@ -4,3 +4,20 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .DS_Store
+
+# Secrets
+.env
+
+# Runtime logs and outputs
+logs/
+screener.log
+screener_output/
+
+# Generated artifacts and cache
+artifacts/
+*.egg-info/
+
+# Strategy data/cache (generated, not source)
+strategies/**/Data/cache/
+strategies/**/trades/
+strategies/**/experiments/

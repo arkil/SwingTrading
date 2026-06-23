@@ -1,0 +1,65 @@
+# CBT Framework State
+# Strategy: cheap_calls_weekly_0_7dte
+# DO NOT EDIT MANUALLY - managed by CBT Framework
+
+strategy: cheap_calls_weekly_0_7dte
+created: 2026-06-12
+last_updated: 2026-06-12
+
+mode: yolo
+engine: fast
+
+project_type: indicator
+
+phase: iterate
+
+phases_completed:
+  discovery: true
+  research: true
+  eda: false
+  config: true
+  plan: true
+  build: true
+
+build:
+  plan:
+    - step: data_pipeline
+      status: complete
+      output: src/data_loader.py
+    - step: features
+      status: complete
+      output: src/features.py
+    - step: options_sim
+      status: complete
+      output: src/options_sim.py
+    - step: signals
+      status: complete
+      output: src/signals.py
+    - step: strategy_integration
+      status: complete
+      output: strategy.py
+    - step: backtest_sweep
+      status: complete
+      output: backtest.py
+  current_step: null
+  progress: "6/6"
+
+experiments:
+  count: 0
+  current: null
+  best: null
+  baseline_sharpe: null
+
+pending_observations: []
+iterations: []
+
+report_file: null
+
+live:
+  deployed: false
+  exchange: null
+  mode: null
+
+prop_firm:
+  enabled: false
+  account_type: personal

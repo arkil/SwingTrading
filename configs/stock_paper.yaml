@@ -1,0 +1,49 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Stock Daily Alerts — Paper Trader Config
+#
+#  Run (continuous daily loop):
+#       python stock_paper_trader.py --config configs/stock_paper.yaml
+#
+#  Run one scan immediately (any time, no market-hours wait):
+#       python stock_paper_trader.py --now
+#
+#  Check exits only (no new entries):
+#       python stock_paper_trader.py --monitor-only
+# ─────────────────────────────────────────────────────────────────────────────
+
+broker:
+  mode: paper       # paper | live
+  api_key: ""       # leave blank — reads ALPACA_API_KEY env var
+  secret_key: ""    # leave blank — reads ALPACA_SECRET_KEY env var
+
+universe:
+  preset: "Tech Leaders"
+  # Override with specific tickers (leave empty to use preset):
+  custom_tickers: [NVDA, MSFT, AAPL, AMZN, META, GOOGL, AMD, TSLA, AVGO, CRM,
+                   NOW, SNOW, DDOG, CRWD, NET, PANW, ADBE, INTU, AMAT, KLAC,
+                   SMCI, ARM, PLTR, TTD, MELI]
+
+strategy:
+  scan_time:           "09:35"   # ET — daily scan time (continuous loop only)
+  min_score:           6         # 4=WATCH · 6=BUY · 8=STRONG BUY
+  max_positions:       5         # max concurrent equity positions
+  risk_pct:            1.0       # % of portfolio to risk per trade (1R)
+  max_position_pct:    10.0      # hard cap: max single position as % of portfolio
+  max_dollars_per_trade: 2000    # hard dollar cap per position
+  use_t2_target:       true      # true=T2 (2R) as bracket TP; false=T1 (1R)
+
+exit:
+  # Time exit: close after N calendar days regardless of P&L
+  # Research basis: swing trades degrade after 10-15 days without follow-through
+  max_hold_days:    10
+
+  # Urgent technical exit: close when generate_exit_signals() returns URGENT
+  # Triggers: EMA9<EMA21 + any second signal, MACD bearish cross + distribution,
+  #           broke below EMA50, Livermore downward pivot
+  urgent_exit:      true
+
+  # Bracket order exits (managed automatically by Alpaca):
+  #   stop_loss  = Entry - 1.5×ATR(14)   [from signal]
+  #   take_profit = T2 = Entry + 2×ATR(14) [from signal, or T1 if use_t2_target=false]
+
+  monitor_interval: 15   # minutes between exit checks during session

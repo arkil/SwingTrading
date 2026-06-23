@@ -1,0 +1,63 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Pure Bollinger Band + RSI Mean-Reversion  (faithful to original strategy)
+#
+#  Entry  : 5-min close outside BB(20,2) AND RSI(14) oversold/overbought
+#  Exit   : 5% option profit target  OR  3-bar (15 min) time exit
+#  Stop   : NONE  (stop_atr_mult=0 disables ATR stop — time exit is the stop)
+#  Option : nearest OTM, 2 DTE, $1,000 capital per trade
+# ─────────────────────────────────────────────────────────────────────────────
+
+data:
+  symbol: SPY
+  interval: 5m
+  period: 60d
+  timezone: America/New_York
+  session_start: "09:30"
+  session_end: "16:00"
+
+strategy:
+  name: bollinger_rsi_reversal
+  params:
+    # Indicator settings
+    bb_length: 20
+    bb_std: 2.0
+    rsi_length: 14
+    atr_length: 14           # ATR still computed for logging; stop is off
+
+    # Signal thresholds — "oversold or near oversold"
+    rsi_oversold: 30         # RSI ≤ 30 → long signal
+    rsi_overbought: 70       # RSI ≥ 70 → short signal
+
+    # Session guards — skip first 5 min (open volatility) and last 10 min
+    session_start: "09:30"
+    session_end: "16:00"
+    avoid_open_minutes: 5
+    avoid_close_minutes: 10
+
+risk:
+  capital_per_trade: 1000     # $1,000 per trade (original rule)
+  option_target_pct: 0.05     # 5% option price gain = profit target
+  hold_bars: 3                # ≈15 min time exit (original rule)
+  option_leverage: 20.0       # delta-adjusted leverage estimate
+  stop_atr_mult: 0            # 0 = no ATR stop; time exit is the only stop
+  commission_per_trade: 1.0
+  cooldown_bars: 0            # allow back-to-back signals
+  max_trades_per_day: 0       # unlimited (original strategy monitors each trade)
+
+options:
+  provider: polygon
+  exit_model: option_native   # use real option OHLCV bars for P&L when available
+  dte_target_days: 2          # 2 DTE (original: "2–3 days out")
+  otm_steps: 1                # nearest OTM strike (original rule)
+  use_real_prices_for_pnl: true
+  require_real_prices: false  # fall back to synthetic when Polygon has no data
+  provider_params:
+    api_key: ""               # set MASSIVE_API_KEY env var or fill in here
+    base_url: "https://api.massive.com"
+    timeout_sec: 20
+    max_retries: 5
+    backoff_sec: 0.8
+    max_pages: 3
+    slippage_bps: 10          # 10 bps round-trip slippage
+    min_option_volume: 0
+    min_option_price: 0.05

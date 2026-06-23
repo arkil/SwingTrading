@@ -4,18 +4,18 @@ from datetime import timedelta
 
 import pandas as pd
 import yfinance as yf
+from pandas.tseries.offsets import BDay
 
 from daytrade_backtester.data.cache import load_df_cache, save_df_cache
 
 
-def _nearest_expiry(expiries: list[str], target_date: pd.Timestamp) -> str | None:
-    valid = [pd.Timestamp(e).date() for e in expiries]
-    want = target_date.date()
-    future = [d for d in valid if d >= want]
-    if not future:
-        return None
-    chosen = min(future)
-    return chosen.strftime("%Y-%m-%d")
+def _target_expiry_from_business_days(expiries: list[str], entry_time: pd.Timestamp, dte_target_days: int) -> str | None:
+    target = (entry_time.normalize() + BDay(dte_target_days)).date()
+    valid = sorted(pd.Timestamp(e).date() for e in expiries)
+    for d in valid:
+        if d >= target:
+            return pd.Timestamp(d).strftime("%Y-%m-%d")
+    return None
 
 
 def _select_contract_symbol(chain: pd.DataFrame, side: str, spot: float, otm_steps: int) -> str | None:
@@ -100,6 +100,42 @@ def _price_near_time(df: pd.DataFrame, ts: pd.Timestamp) -> float | None:
     return None
 
 
+def lookup_option_contract_and_bars(
+    symbol: str,
+    side: str,
+    entry_time: pd.Timestamp,
+    end_time: pd.Timestamp,
+    spot_entry: float,
+    interval: str,
+    timezone: str,
+    dte_target_days: int,
+    otm_steps: int,
+) -> tuple[str | None, pd.DataFrame, str]:
+    try:
+        base = yf.Ticker(symbol)
+        expiries = list(base.options)
+        if not expiries:
+            return None, pd.DataFrame(), "no_chain_from_yahoo"
+
+        expiry = _target_expiry_from_business_days(expiries, entry_time, dte_target_days)
+        if not expiry:
+            return None, pd.DataFrame(), "target_business_dte_expiry_not_found"
+
+        chain = base.option_chain(expiry)
+        table = chain.calls if side == "long" else chain.puts
+        contract = _select_contract_symbol(table, side, spot_entry, otm_steps)
+        if not contract:
+            return None, pd.DataFrame(), "contract_not_found"
+
+        bars = _fetch_option_bars(contract, entry_time, end_time, interval, timezone)
+        if bars.empty:
+            return contract, pd.DataFrame(), "no_price_bars"
+
+        return contract, bars, "ok"
+    except Exception:
+        return None, pd.DataFrame(), "api_error"
+
+
 def lookup_option_entry_exit(
     symbol: str,
     side: str,
@@ -111,35 +147,23 @@ def lookup_option_entry_exit(
     dte_target_days: int,
     otm_steps: int,
 ) -> tuple[str | None, float | None, float | None, str]:
-    try:
-        base = yf.Ticker(symbol)
-        expiries = list(base.options)
-        if not expiries:
-            return None, None, None, "no_chain_from_yahoo"
+    contract, bars, status = lookup_option_contract_and_bars(
+        symbol=symbol,
+        side=side,
+        entry_time=entry_time,
+        end_time=exit_time,
+        spot_entry=spot_entry,
+        interval=interval,
+        timezone=timezone,
+        dte_target_days=dte_target_days,
+        otm_steps=otm_steps,
+    )
+    if bars.empty:
+        return contract, None, None, status
 
-        expiry = _nearest_expiry(expiries, entry_time + pd.Timedelta(days=dte_target_days))
-        if not expiry:
-            return None, None, None, "no_matching_expiry"
+    entry_opt = _price_near_time(bars, entry_time)
+    exit_opt = _price_near_time(bars, exit_time)
+    if entry_opt is None or exit_opt is None:
+        return contract, entry_opt, exit_opt, "missing_entry_or_exit_price"
 
-        expiry_dt = pd.Timestamp(expiry, tz=entry_time.tz)
-        if abs((expiry_dt - entry_time).days) > 10:
-            return None, None, None, "historical_chain_unavailable"
-
-        chain = base.option_chain(expiry)
-        table = chain.calls if side == "long" else chain.puts
-        contract = _select_contract_symbol(table, side, spot_entry, otm_steps)
-        if not contract:
-            return None, None, None, "contract_not_found"
-
-        bars = _fetch_option_bars(contract, entry_time, exit_time, interval, timezone)
-        if bars.empty:
-            return contract, None, None, "no_price_bars"
-
-        entry_opt = _price_near_time(bars, entry_time)
-        exit_opt = _price_near_time(bars, exit_time)
-        if entry_opt is None or exit_opt is None:
-            return contract, entry_opt, exit_opt, "missing_entry_or_exit_price"
-
-        return contract, entry_opt, exit_opt, "ok"
-    except Exception:
-        return None, None, None, "api_error"
+    return contract, entry_opt, exit_opt, "ok"

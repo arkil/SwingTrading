@@ -1,0 +1,46 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Options 45-60 DTE Paper Trader Config
+#
+#  Run (continuous daily loop):
+#       python options_paper_trader.py --config configs/options_paper.yaml
+#
+#  Run one scan immediately (any time, no market-hours wait):
+#       python options_paper_trader.py --now
+#
+#  Check exits only (no new entries):
+#       python options_paper_trader.py --monitor-only
+# ─────────────────────────────────────────────────────────────────────────────
+
+broker:
+  mode: paper           # paper | live
+  api_key: ""           # leave blank — reads ALPACA_API_KEY env var
+  secret_key: ""        # leave blank — reads ALPACA_SECRET_KEY env var
+
+universe:
+  preset: "Tech Leaders"
+  # Backtested optimal universe (AAPL/AMZN/GOOGL excluded — negative EV in backtest)
+  custom_tickers: [QQQ, MSFT, NVDA, TSLA, META, AMD]
+
+strategy:
+  scan_time:       "09:35"  # ET — when to scan after open (daily loop only)
+  min_score:       7.5      # raised from 7.0 — backtest: 7.5 calls / 8.0 puts optimal
+  max_positions:   4        # max concurrent option positions
+  pct_per_trade:   5.0      # % of portfolio per trade
+  dte_target:      52       # raised from 50 — backtested theta sweet spot
+  iv_premium:      1.10     # IV = hist_vol × iv_premium
+  direction:       "ALL"    # ALL | LONG (calls only) | SHORT (puts only)
+  vix_call_max:    22.0     # block new calls when VIX >= this (low WR in fear)
+  vix_puts_only:   25.0     # force puts-only when VIX >= this
+
+  # Greeks overrides — tuned for high-IV universe (NVDA/TSLA/META/AMD all σ≥0.30)
+  # Default gamma_min=0.005 blocks high-priced stocks (META γ≈0.0038 at fair strikes)
+  # Default theta_vega_max=0.40 blocks all high-IV names (backtest comment: σ≥0.30 → 0.37+)
+  gamma_min:              0.003   # was 0.005 — allows high-priced stocks at fair strikes
+  theta_vega_ratio_max:   0.55    # was 0.40 — accommodates NVDA/TSLA/META natural IV premium
+
+exit:
+  tp_pct:           1.00    # raised from 0.50 — backtest optimal: double your money
+  sl_pct:           0.50    # raised from 0.25 — give options room to breathe
+  dte_exit:         21      # force exit when DTE falls to this level
+  max_hold_days:    21      # max calendar days to hold
+  monitor_interval: 15      # minutes between exit checks during session

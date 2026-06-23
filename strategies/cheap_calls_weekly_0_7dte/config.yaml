@@ -1,0 +1,74 @@
+# CBT Framework Configuration
+# Strategy: cheap_calls_weekly_0_7dte
+
+account:
+  initial_capital: 10000
+  currency: USD
+
+engine:
+  type: fast  # pandas | fast (Polars + NumPy + Numba)
+
+sizing:
+  mode: fixed
+  fixed_amount: 150       # max $150/contract (1 contract per signal)
+  max_positions: 5
+
+leverage:
+  enabled: false
+
+risk:
+  stop_loss:
+    enabled: true
+    mode: percent
+    percent: 50.0         # exit if option loses 50% of premium
+  take_profit:
+    enabled: true
+    mode: percent
+    percent: 100.0        # exit if option doubles
+  trailing_stop:
+    enabled: false
+
+fees:
+  maker: 0.0
+  taker: 0.0
+  slippage: 0.05          # 5 cents/share slippage on option entry
+
+execution:
+  entry_type: market
+  exit_type: market
+  partial_exits: false
+
+time:
+  start_date: "2023-01-01"
+  end_date: null
+  trading_hours: "09:30-16:00"
+
+prop_firm:
+  enabled: false
+
+# Strategy-specific parameters
+strategy_params:
+  max_dte: 7              # calendar days to expiration
+  min_dte: 0
+  max_premium: 1.50       # max option premium ($/share)
+  delta_min: 0.05
+  delta_max: 0.45
+  min_volume: 50
+  moneyness_pct: 15       # strike within ±15% of spot
+  max_spread_pct: 30
+  go_score_min: 0.0       # filter threshold to sweep
+  iv_assumption: 0.45     # fallback IV for BS pricing (45%)
+  sim_move_pct: 5.0       # simulated stock move for return estimate
+
+notifications:
+  discord:
+    enabled: false
+    webhook_url: null
+  telegram:
+    enabled: false
+    bot_token: null
+    chat_id: null
+
+live:
+  exchange: null
+  mode: paper

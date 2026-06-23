@@ -28,4 +28,7 @@ def load_config(path: str | Path) -> BacktestConfig:
         options_block["provider"] = options_block.pop("mode")
     options_cfg = OptionsConfig(**options_block)
 
-    return BacktestConfig(data=data_cfg, strategy=strategy_cfg, risk=risk_cfg, options=options_cfg)
+    cfg = BacktestConfig(data=data_cfg, strategy=strategy_cfg, risk=risk_cfg, options=options_cfg)
+    # Pass through the raw `broker` block for the live runner (ignored by backtester).
+    cfg.broker = payload.get("broker", {})  # type: ignore[attr-defined]
+    return cfg

@@ -1,0 +1,37 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Daily Alerts Live Config  —  Swing Trading  —  Alpaca paper mode
+#
+#  SETUP
+#  -----
+#  1. Make sure .env has ALPACA_API_KEY and ALPACA_SECRET_KEY
+#  2. Run:
+#       python alerts_live_runner.py --config configs/alerts_live.yaml
+#
+#  Or for a one-shot scan (no daily loop):
+#       python alerts_live_runner.py --once
+# ─────────────────────────────────────────────────────────────────────────────
+
+broker:
+  mode: paper           # paper | live
+  api_key: ""           # leave blank — reads ALPACA_API_KEY env var
+  secret_key: ""        # leave blank — reads ALPACA_SECRET_KEY env var
+
+universe:
+  preset: "High-Growth Tech"   # High-Growth Tech | Large Cap Leaders | S&P 500 | Nasdaq-100 | 🔥 Trending
+  custom_tickers: []            # override preset with specific tickers e.g. [NVDA, AAPL, TSLA]
+
+strategy:
+  min_score:            8       # STRONG only — backtest: score≥8 → 57.7% WR vs 52.1% at score≥7
+  max_positions:        3       # max new bracket orders per day
+  risk_pct:             0.5     # % of portfolio to risk per trade
+  max_position_pct:     5.0     # max single position size as % of portfolio
+  max_dollars_per_trade: 1000   # hard cap: never spend more than $1000 per entry
+  take_profit:          "T2"    # T1 (1R) | T2 (2R) | T3 (3R)
+  direction:            "BUY"   # BUY | SELL | ALL
+  scan_time:            "09:35" # ET — scan starts 5 min after open
+
+risk:
+  max_hold_days:        20    # force-close after this many days even if no SL/TP
+  monitor_interval_min: 15    # how often to check P&L and exit signals (minutes)
+  urgent_exit:          true  # close position when exit signals are URGENT
+  time_exit:            true  # close position when max_hold_days exceeded

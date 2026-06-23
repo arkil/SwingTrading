@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,13 @@ def _path(namespace: str, payload: dict[str, Any], suffix: str) -> Path:
     return directory / f"{key}.{suffix}"
 
 
+def _refresh_cache_enabled() -> bool:
+    return os.getenv("DTB_REFRESH_CACHE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def load_df_cache(namespace: str, payload: dict[str, Any]) -> pd.DataFrame | None:
+    if _refresh_cache_enabled():
+        return None
     p = _path(namespace, payload, "pkl")
     if not p.exists():
         return None
@@ -43,6 +50,8 @@ def save_df_cache(namespace: str, payload: dict[str, Any], df: pd.DataFrame) -> 
 
 
 def load_json_cache(namespace: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    if _refresh_cache_enabled():
+        return None
     p = _path(namespace, payload, "json")
     if not p.exists():
         return None

@@ -1,0 +1,70 @@
+# CBT Framework Configuration
+# Strategy: daily_alerts_guardrails
+
+account:
+  initial_capital: 100000
+  currency: USD
+
+engine:
+  type: fast  # fast = Polars + NumPy + Numba
+
+sizing:
+  mode: percent
+  percent_per_trade: 1.0      # risk 1% of equity per trade
+  fixed_amount: null
+  max_positions: 5
+
+leverage:
+  enabled: false
+  default: 1
+  max: 1
+
+risk:
+  stop_loss:
+    enabled: true
+    mode: atr
+    atr_multiplier: 1.5
+  take_profit:
+    enabled: true
+    mode: atr
+    atr_multiplier: 2.0
+    rr_ratio: null
+  trailing_stop:
+    enabled: false
+
+fees:
+  maker: 0.0      # equity — no maker fee
+  taker: 0.005    # 0.5 bps commission (Alpaca)
+  slippage: 0.05  # 5 bps slippage estimate
+
+execution:
+  entry_type: limit         # next-open limit order
+  exit_type: market
+  partial_exits: false
+
+time:
+  start_date: "2023-01-01"
+  end_date: null            # latest available
+  trading_hours: "09:30-16:00"
+
+# Guardrail parameters — sweep these in experiments
+strategy_params:
+  min_score: 8              # STRONG only — sweep: score=8 beats score=7 by 6pp win rate
+  max_ext_pct: 30.0         # max % above 50MA — blocks ARM(53%); sweep: 30 > 20
+  rsi_bull_min: 42
+  rsi_bull_max: 70          # sweep: 70 > 65 (extension filter is the real ARM guardrail)
+  rsi_bear_min: 35
+  rsi_bear_max: 58
+  min_adx: 20.0
+  min_rr: 1.0               # ATR stop/target fixes R/R at ~1.33; must be ≤1.33
+  min_vol_ratio: 1.2
+  require_trigger: true
+  breakout_rsi_cap: 70      # RSI cap for 52W high breakout
+
+prop_firm:
+  enabled: false
+
+notifications:
+  discord:
+    enabled: false
+    webhook_url: null

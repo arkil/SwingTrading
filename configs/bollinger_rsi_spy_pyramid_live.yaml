@@ -1,0 +1,68 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  SPY Pyramid Live  —  BB+RSI  —  Calls AND Puts  —  No guardrails
+#
+#  Pyramid logic (from diagram):
+#    Entry  : 1 contract on BB+RSI signal
+#    Scale1 : +1.5%  option return → add 2nd contract
+#    Scale2 : +2.7%  option return → add 3rd contract
+#    Stop   : -10%   option return → close ALL
+#    Exit1  : +3.4%  → sell 1
+#    Exit2  : +6.4%  → sell 1
+#    Exit3  : +11.2% or time → sell last
+#
+#  Run:  dtb-pyramid --config configs/bollinger_rsi_spy_pyramid_live.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+
+broker:
+  mode: paper            # live | paper
+  api_key: ""            # use ALPACA_API_KEY env var
+  secret_key: ""         # use ALPACA_SECRET_KEY env var
+
+data:
+  symbol: SPY
+  interval: 1m
+  timezone: America/New_York
+  session_start: "09:30"
+  session_end:   "16:00"
+
+strategy:
+  name: bollinger_rsi_reversal
+  params:
+    bb_length: 20
+    bb_std:    1.5
+    rsi_length: 14
+    atr_length: 14
+    adx_length: 14
+    volume_ma_length: 20
+
+    rsi_oversold:   40
+    rsi_overbought: 60
+
+    long_only:                    false   # BOTH calls and puts
+    require_reentry_confirmation: false   # enter on the breakout bar itself
+    require_long_above_sma:       false   # no SMA regime filter
+    min_rel_volume:               0       # no volume filter
+    max_adx:                      0       # no ADX filter
+
+    session_start: "09:30"
+    session_end:   "16:00"
+    avoid_open_minutes:  15     # skip first 15 min
+    avoid_close_minutes: 45     # no new entries in last 45 min (from 3:15 PM)
+    eod_close_minutes:   5      # force-close any open position 5 min before close (3:55 PM)
+
+risk:
+  capital_per_trade: 1000   # max capital per trade — sizes qty = floor(1000 / (P0 × 100))
+
+  # Pyramid thresholds (relative to entry option price P0)
+  scale1_pct:  0.015    # +1.5%  → add 2nd contract
+  scale2_pct:  0.027    # +2.7%  → add 3rd contract
+  stop_pct:    0.10     # -10%   → close ALL
+  target1_pct: 0.034    # +3.4%  → sell 1 contract
+  target2_pct: 0.064    # +6.4%  → sell 1 contract
+  target3_pct: 0.112    # +11.2% → sell last contract
+
+  hold_bars: 30         # 30 × 1m = 30 min max hold (fallback time exit)
+
+options:
+  dte_target_days: 2    # 2 DTE — slightly less theta decay, more room to move
+  otm_steps: 0          # ATM (most liquid, tightest spreads)

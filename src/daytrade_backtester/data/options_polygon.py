@@ -6,6 +6,7 @@ import time
 
 import pandas as pd
 import requests
+from pandas.tseries.offsets import BDay
 
 from daytrade_backtester.data.cache import load_df_cache, load_json_cache, save_df_cache, save_json_cache
 
@@ -139,9 +140,9 @@ def _pick_contract(results: list[dict], side: str, spot: float, dte_target_days:
     if not results:
         return None
 
-    target_exp = (entry_date + pd.Timedelta(days=dte_target_days)).date()
+    target_exp = (entry_date.normalize() + BDay(dte_target_days)).date()
 
-    enriched = []
+    candidates = []
     for row in results:
         exp = row.get("expiration_date")
         strike = row.get("strike_price")
@@ -153,21 +154,24 @@ def _pick_contract(results: list[dict], side: str, spot: float, dte_target_days:
         except Exception:
             continue
 
+        if exp_date < target_exp:
+            continue
+
         if side == "long" and strike_f < spot:
             continue
         if side == "short" and strike_f > spot:
             continue
 
-        dte_gap = abs((exp_date - target_exp).days)
+        exp_gap = (exp_date - target_exp).days
         moneyness_gap = abs(strike_f - spot)
-        enriched.append((dte_gap, exp_date, moneyness_gap, strike_f, row))
+        candidates.append((exp_gap, moneyness_gap, strike_f, row))
 
-    if not enriched:
+    if not candidates:
         return None
 
-    enriched.sort(key=lambda x: (x[0], x[1], x[2]))
-    idx = min(max(otm_steps - 1, 0), len(enriched) - 1)
-    return enriched[idx][4]
+    candidates.sort(key=lambda x: (x[0], x[1], x[2]))
+    idx = min(max(otm_steps - 1, 0), len(candidates) - 1)
+    return candidates[idx][3]
 
 
 def _price_near_time(df: pd.DataFrame, ts: pd.Timestamp) -> float | None:
@@ -233,9 +237,76 @@ def _fetch_aggs_bars(
     bars = pd.DataFrame(results)
     bars["timestamp"] = pd.to_datetime(bars["t"], unit="ms", utc=True).dt.tz_convert(entry_time.tz)
     bars = bars.set_index("timestamp")
-    bars = bars.rename(columns={"c": "close"})
+    bars = bars.rename(columns={"o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"})
     save_df_cache("options_polygon_bars", payload, bars)
     return bars, "ok"
+
+
+def lookup_option_contract_and_bars_polygon(
+    symbol: str,
+    side: str,
+    entry_time: pd.Timestamp,
+    end_time: pd.Timestamp,
+    spot_entry: float,
+    interval: str,
+    dte_target_days: int,
+    otm_steps: int,
+    api_key: str,
+    base_url: str = "https://api.massive.com",
+    timeout_sec: float = 20.0,
+    max_retries: int = 4,
+    backoff_sec: float = 0.8,
+    max_pages: int = 3,
+) -> tuple[str | None, pd.DataFrame, str]:
+    if not api_key:
+        return None, pd.DataFrame(), "missing_api_key"
+
+    contract_type = "call" if side == "long" else "put"
+    ref_results, ref_status = _fetch_reference_contracts(
+        symbol=symbol,
+        contract_type=contract_type,
+        entry_time=entry_time,
+        api_key=api_key,
+        base_url=base_url,
+        timeout_sec=timeout_sec,
+        max_retries=max_retries,
+        backoff_sec=backoff_sec,
+        max_pages=max_pages,
+    )
+    if not ref_results:
+        return None, pd.DataFrame(), f"reference_api_error:{ref_status}"
+
+    contract = _pick_contract(
+        ref_results,
+        side=side,
+        spot=spot_entry,
+        dte_target_days=dte_target_days,
+        entry_date=entry_time,
+        otm_steps=otm_steps,
+    )
+    if not contract:
+        return None, pd.DataFrame(), "target_business_dte_contract_not_found"
+
+    ticker = contract.get("ticker")
+    if not ticker:
+        return None, pd.DataFrame(), "missing_contract_ticker"
+
+    bars, bars_status = _fetch_aggs_bars(
+        ticker=ticker,
+        interval=interval,
+        entry_time=entry_time,
+        exit_time=end_time,
+        api_key=api_key,
+        base_url=base_url,
+        timeout_sec=timeout_sec,
+        max_retries=max_retries,
+        backoff_sec=backoff_sec,
+    )
+
+    if bars.empty:
+        return ticker, pd.DataFrame(), f"no_price_bars:{bars_status}"
+
+    return ticker, bars, "ok"
 
 
 def lookup_option_entry_exit_polygon(
@@ -254,14 +325,15 @@ def lookup_option_entry_exit_polygon(
     backoff_sec: float = 0.8,
     max_pages: int = 3,
 ) -> tuple[str | None, float | None, float | None, str]:
-    if not api_key:
-        return None, None, None, "missing_api_key"
-
-    contract_type = "call" if side == "long" else "put"
-    ref_results, ref_status = _fetch_reference_contracts(
+    ticker, bars, status = lookup_option_contract_and_bars_polygon(
         symbol=symbol,
-        contract_type=contract_type,
+        side=side,
         entry_time=entry_time,
+        end_time=exit_time,
+        spot_entry=spot_entry,
+        interval=interval,
+        dte_target_days=dte_target_days,
+        otm_steps=otm_steps,
         api_key=api_key,
         base_url=base_url,
         timeout_sec=timeout_sec,
@@ -269,38 +341,9 @@ def lookup_option_entry_exit_polygon(
         backoff_sec=backoff_sec,
         max_pages=max_pages,
     )
-    if not ref_results:
-        return None, None, None, f"reference_api_error:{ref_status}"
-
-    contract = _pick_contract(
-        ref_results,
-        side=side,
-        spot=spot_entry,
-        dte_target_days=dte_target_days,
-        entry_date=entry_time,
-        otm_steps=otm_steps,
-    )
-    if not contract:
-        return None, None, None, "contract_not_found"
-
-    ticker = contract.get("ticker")
-    if not ticker:
-        return None, None, None, "missing_contract_ticker"
-
-    bars, bars_status = _fetch_aggs_bars(
-        ticker=ticker,
-        interval=interval,
-        entry_time=entry_time,
-        exit_time=exit_time,
-        api_key=api_key,
-        base_url=base_url,
-        timeout_sec=timeout_sec,
-        max_retries=max_retries,
-        backoff_sec=backoff_sec,
-    )
 
     if bars.empty:
-        return ticker, None, None, f"no_price_bars:{bars_status}"
+        return ticker, None, None, status
 
     opt_entry = _price_near_time(bars, entry_time)
     opt_exit = _price_near_time(bars, exit_time)

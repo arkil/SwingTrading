@@ -1,0 +1,64 @@
+# CBT Framework State
+# Strategy: daily_alerts_guardrails
+# DO NOT EDIT MANUALLY - managed by CBT Framework
+
+strategy: daily_alerts_guardrails
+created: 2026-05-07
+last_updated: 2026-05-07
+
+mode: yolo
+engine: fast  # Polars + NumPy + Numba
+
+project_type: indicator
+
+phase: build
+phases_completed:
+  discovery: true
+  research: true
+  eda: true
+  config: true
+  plan: true
+  build: true
+
+build:
+  plan:
+    - "Vectorized indicator frame (indicators.py)"
+    - "Guardrail scoring (signals.py)"
+    - "Numba trade simulation (backtest.py)"
+    - "Polars parameter sweep (sweep.py)"
+    - "CLI runner (run_backtest.py)"
+  current_step: complete
+  progress: "5/5"
+
+experiments:
+  count: 2
+  current: "best_combo_quick_30"
+  best: "min_score=8, max_ext_pct=30, rsi_bull_max=70"
+  baseline_sharpe: null
+
+iterations:
+  - id: 1
+    date: 2026-05-07
+    description: "Narrow sweep (8 combos) on 30-ticker quick universe"
+    result: "Best: score=8, ext=30%, rsi_max=70 → 58.8% WR, +0.295R expectancy"
+  - id: 2
+    date: 2026-05-07
+    description: "Full backtest with best combo on 30-ticker universe, 800 days"
+    result: "52 trades, 57.7% WR, +0.270R expectancy, Sharpe 3.96, MaxDD -5.9%"
+
+pending_observations:
+  - "Run full 600-ticker sweep to validate results at scale"
+  - "Test SELL side signals (currently 0 SELL trades)"
+  - "Add earnings filter (avoid entry within 5 days of earnings)"
+  - "Test trailing stop vs fixed ATR exit"
+
+report_file: null
+
+live:
+  deployed: false
+  exchange: alpaca
+  mode: paper
+
+prop_firm:
+  enabled: false
+  account_type: personal
