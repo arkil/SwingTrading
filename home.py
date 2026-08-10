@@ -50,78 +50,317 @@ st.markdown("""
 <style>
 html, body { overflow-y: auto !important; }
 .block-container {
-    padding: 1.2rem 2rem 2rem !important;
-    max-width: 1500px;
+    padding: 2rem 3rem 3rem !important;
+    max-width: 1600px;
 }
-/* Section card */
-.dash-card {
-    background: #0f172a;
-    border: 1px solid #1e293b;
-    border-radius: 12px;
-    padding: 1rem 1.2rem 1.2rem;
-    margin-bottom: 1rem;
-}
-.dash-card h3 {
-    color: #e2e8f0;
-    font-size: 15px;
-    font-weight: 700;
-    letter-spacing: .6px;
-    margin: 0 0 .7rem;
-    text-transform: uppercase;
-}
-/* Status bar */
-.status-bar {
+
+/* === BREADCRUMB === */
+.breadcrumb {
     display: flex;
-    gap: 1.4rem;
     align-items: center;
-    background: #0f172a;
-    border: 1px solid #1e293b;
-    border-radius: 10px;
-    padding: .55rem 1.2rem;
-    margin-bottom: 1rem;
+    gap: 8px;
+    margin-bottom: 24px;
     font-size: 13px;
     color: #94a3b8;
 }
-.status-bar .label { color: #475569; font-size: 11px; text-transform: uppercase; letter-spacing: .8px; }
-.status-bar .val   { color: #f1f5f9; font-weight: 600; }
-.status-bar .dot-open  { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; display:inline-block; margin-right:5px; }
-.status-bar .dot-closed { width: 8px; height: 8px; border-radius: 50%; background: #ef4444; display:inline-block; margin-right:5px; }
-/* Signal badges */
-.sig-strong { background: #14532d; color: #86efac; padding: 2px 8px; border-radius: 5px; font-size: 11px; font-weight: 700; }
-.sig-buy    { background: #052e16; color: #4ade80; padding: 2px 8px; border-radius: 5px; font-size: 11px; font-weight: 700; }
-.sig-watch  { background: #1c1917; color: #fbbf24; padding: 2px 8px; border-radius: 5px; font-size: 11px; font-weight: 700; }
-.sig-call   { background: #052e16; color: #34d399; padding: 2px 8px; border-radius: 5px; font-size: 11px; font-weight: 700; }
-.sig-put    { background: #450a0a; color: #f87171; padding: 2px 8px; border-radius: 5px; font-size: 11px; font-weight: 700; }
-.sig-bo     { background: #1e1b4b; color: #a5b4fc; padding: 2px 8px; border-radius: 5px; font-size: 11px; font-weight: 700; }
-/* Impact badges */
-.imp-high   { background: #7f1d1d; color: #fca5a5; padding: 2px 8px; border-radius: 5px; font-size: 11px; font-weight: 700; }
-.imp-medium { background: #78350f; color: #fcd34d; padding: 2px 8px; border-radius: 5px; font-size: 11px; font-weight: 700; }
-.imp-earn   { background: #164e63; color: #67e8f9; padding: 2px 8px; border-radius: 5px; font-size: 11px; font-weight: 700; }
-/* Ticker cells */
-.ticker { font-size: 15px; font-weight: 700; color: #f8fafc; letter-spacing: .5px; }
-.price  { font-size: 13px; color: #94a3b8; }
-.green  { color: #4ade80; font-weight: 600; }
-.red    { color: #f87171; font-weight: 600; }
-/* Compact table rows */
-table.dash-tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+.breadcrumb a {
+    color: #2563eb;
+    text-decoration: none;
+}
+.breadcrumb a:hover {
+    text-decoration: underline;
+}
+.breadcrumb-sep {
+    color: #64748b;
+}
+
+/* === HEADER SECTION === */
+.page-header {
+    margin-bottom: 32px;
+}
+.page-title {
+    font-size: 32px;
+    font-weight: 600;
+    color: #f5f7fa;
+    margin: 0 0 8px 0;
+    line-height: 1.2;
+}
+.page-subtitle {
+    font-size: 14px;
+    color: #cbd5e1;
+    margin: 0 0 16px 0;
+}
+.page-meta {
+    font-size: 13px;
+    color: #94a3b8;
+}
+
+/* === STATUS BAR === */
+.status-bar {
+    display: flex;
+    gap: 24px;
+    align-items: center;
+    background: #1a2332;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 12px 20px;
+    margin-bottom: 32px;
+    font-size: 13px;
+    color: #cbd5e1;
+}
+.status-bar .label {
+    color: #94a3b8;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 600;
+}
+.status-bar .val   {
+    color: #f5f7fa;
+    font-weight: 600;
+    font-size: 14px;
+}
+.status-bar .dot-open  {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #10b981;
+    display: inline-block;
+    margin-right: 6px;
+}
+.status-bar .dot-closed {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #ef4444;
+    display: inline-block;
+    margin-right: 6px;
+}
+
+/* === SECTION CARD === */
+.dash-card {
+    background: #1a2332;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 24px;
+    margin-bottom: 32px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+.dash-card h3 {
+    color: #f5f7fa;
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: 0;
+    margin: 0 0 16px 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* === SIGNAL BADGES === */
+.sig-strong {
+    background: rgba(16, 185, 129, 0.15);
+    color: #10b981;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid rgba(16, 185, 129, 0.3);
+}
+.sig-buy    {
+    background: rgba(16, 185, 129, 0.1);
+    color: #10b981;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid rgba(16, 185, 129, 0.2);
+}
+.sig-watch  {
+    background: rgba(245, 158, 11, 0.1);
+    color: #f59e0b;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid rgba(245, 158, 11, 0.2);
+}
+.sig-call   {
+    background: rgba(16, 185, 129, 0.1);
+    color: #10b981;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid rgba(16, 185, 129, 0.2);
+}
+.sig-put    {
+    background: rgba(239, 68, 68, 0.1);
+    color: #ef4444;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid rgba(239, 68, 68, 0.2);
+}
+.sig-bo     {
+    background: rgba(59, 130, 246, 0.1);
+    color: #3b82f6;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid rgba(59, 130, 246, 0.2);
+}
+
+/* === IMPACT BADGES === */
+.imp-high   {
+    background: rgba(239, 68, 68, 0.1);
+    color: #ef4444;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid rgba(239, 68, 68, 0.2);
+}
+.imp-medium {
+    background: rgba(245, 158, 11, 0.1);
+    color: #f59e0b;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid rgba(245, 158, 11, 0.2);
+}
+.imp-earn   {
+    background: rgba(6, 182, 212, 0.1);
+    color: #06b6d4;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid rgba(6, 182, 212, 0.2);
+}
+
+/* === TICKER & PRICE STYLES === */
+.ticker {
+    font-size: 15px;
+    font-weight: 700;
+    color: #f5f7fa;
+    letter-spacing: 0.5px;
+    min-width: 50px;
+}
+.price  {
+    font-size: 14px;
+    color: #cbd5e1;
+    font-family: "SF Mono", Monaco, monospace;
+}
+.green  {
+    color: #10b981;
+    font-weight: 600;
+}
+.red    {
+    color: #ef4444;
+    font-weight: 600;
+}
+
+/* === DATA TABLE === */
+table.dash-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+}
 table.dash-tbl th {
-    color: #475569; font-size: 10px; text-transform: uppercase; letter-spacing: .8px;
-    padding: 4px 8px; border-bottom: 1px solid #1e293b; text-align: left; font-weight: 600;
+    color: #cbd5e1;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 12px 16px;
+    border-bottom: 1px solid #334155;
+    text-align: left;
+    font-weight: 600;
+    background: #0f1419;
 }
 table.dash-tbl td {
-    padding: 6px 8px; border-bottom: 1px solid #0f172a; color: #cbd5e1; vertical-align: middle;
+    padding: 14px 16px;
+    border-bottom: 1px solid #1e293b;
+    color: #f5f7fa;
+    vertical-align: middle;
+    font-variant-numeric: tabular-nums;
 }
-table.dash-tbl tr:last-child td { border-bottom: none; }
-table.dash-tbl tr:hover td { background: #1e293b; }
-/* Event row */
-.event-row { padding: 6px 0; border-bottom: 1px solid #1e293b; display: flex; gap: 10px; align-items: flex-start; }
-.event-row:last-child { border-bottom: none; }
-.event-time { color: #475569; font-size: 11px; min-width: 55px; padding-top: 3px; }
-.event-name { color: #e2e8f0; font-size: 13px; flex: 1; }
-/* No data */
-.no-data { color: #475569; font-size: 13px; padding: 1rem 0; text-align: center; }
-/* Refresh bar */
-.refresh-info { color: #475569; font-size: 11px; }
+table.dash-tbl tr:hover td {
+    background: #252d47;
+}
+table.dash-tbl tr:last-child td {
+    border-bottom: none;
+}
+
+/* === EVENT ROW === */
+.event-row {
+    padding: 12px 0;
+    border-bottom: 1px solid #1e293b;
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+}
+.event-row:last-child {
+    border-bottom: none;
+}
+.event-time {
+    color: #94a3b8;
+    font-size: 12px;
+    min-width: 70px;
+    padding-top: 2px;
+    font-weight: 500;
+}
+.event-name {
+    color: #f5f7fa;
+    font-size: 14px;
+    flex: 1;
+}
+
+/* === EMPTY STATE === */
+.no-data {
+    color: #94a3b8;
+    font-size: 14px;
+    padding: 2rem 1rem;
+    text-align: center;
+    background: #0f1419;
+    border-radius: 6px;
+    border: 1px dashed #334155;
+}
+
+/* === INFO TEXT === */
+.refresh-info {
+    color: #94a3b8;
+    font-size: 13px;
+}
+
+/* === FOCUS STATES === */
+button:focus-visible {
+    outline: 2px solid #2563eb !important;
+    outline-offset: 2px !important;
+}
+
+/* === STREAMLIT BUTTON OVERRIDES === */
+.stButton > button {
+    height: 40px;
+    font-size: 14px;
+    font-weight: 600;
+    border-radius: 6px;
+    border: 1px solid #334155 !important;
+    background-color: #2563eb !important;
+    color: white !important;
+    transition: all 150ms ease;
+}
+.stButton > button:hover {
+    background-color: #1e40af !important;
+    border-color: #2563eb !important;
+}
+.stButton > button:focus {
+    outline: 2px solid #2563eb !important;
+    outline-offset: 2px !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -301,7 +540,7 @@ def _render_day_trades():
         return
 
     if df.empty:
-        st.markdown('<div class="no-data">No high-conviction setups right now.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="no-data">🔍 No high-conviction setups found right now. Check back soon.</div>', unsafe_allow_html=True)
     else:
         rows_html = ""
         for _, r in df.iterrows():
@@ -310,24 +549,24 @@ def _render_day_trades():
             target = _price_str(r.get("Target", "—"))
             rsi    = f'{r["RSI"]:.0f}' if pd.notna(r.get("RSI")) else "—"
             vol    = f'{r["Vol vs Avg"]:.1f}×' if pd.notna(r.get("Vol vs Avg")) else "—"
-            why    = str(r.get("Why", ""))[:60]
+            why    = str(r.get("Why", ""))[:50]
             rows_html += f"""
             <tr>
               <td><span class="ticker">{r['Ticker']}</span></td>
               <td>{_sig_badge(r['Signal'])}</td>
-              <td class="green">{entry}</td>
-              <td class="red">{stop}</td>
-              <td class="green">{target}</td>
-              <td>{rsi}</td>
-              <td>{vol}</td>
-              <td style="color:#64748b;font-size:11px">{why}</td>
+              <td class="price green">{entry}</td>
+              <td class="price red">{stop}</td>
+              <td class="price green">{target}</td>
+              <td class="price">{rsi}</td>
+              <td class="price">{vol}</td>
+              <td style="color:#94a3b8; font-size:12px;">{why}</td>
             </tr>"""
 
         st.markdown(f"""
         <table class="dash-tbl">
           <thead><tr>
             <th>Ticker</th><th>Signal</th><th>Entry</th><th>Stop</th>
-            <th>Target</th><th>RSI</th><th>Vol</th><th>Why</th>
+            <th>Target</th><th>RSI</th><th>Vol%</th><th>Reason</th>
           </tr></thead>
           <tbody>{rows_html}</tbody>
         </table>
@@ -349,7 +588,7 @@ def _render_breakouts():
         return
 
     if df.empty:
-        st.markdown('<div class="no-data">No fresh breakouts detected.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="no-data">🔍 No fresh breakouts detected. Check back soon.</div>', unsafe_allow_html=True)
     else:
         rows_html = ""
         for _, r in df.iterrows():
@@ -364,18 +603,18 @@ def _render_breakouts():
             <tr>
               <td><span class="ticker">{r['Ticker']}</span></td>
               <td><span class="{dir_class}">{direction}</span></td>
-              <td>{entry}</td>
-              <td>{stop}</td>
-              <td>{vol_ratio}</td>
-              <td style="color:#4ade80">{bars_ago}d ago</td>
-              <td style="color:#64748b;font-size:11px">{strategies}</td>
+              <td class="price">{entry}</td>
+              <td class="price">{stop}</td>
+              <td class="price">{vol_ratio}</td>
+              <td class="price green">{bars_ago}d ago</td>
+              <td style="color:#94a3b8;font-size:12px">{strategies}</td>
             </tr>"""
 
         st.markdown(f"""
         <table class="dash-tbl">
           <thead><tr>
-            <th>Ticker</th><th>Dir</th><th>Entry</th><th>Stop</th>
-            <th>Vol</th><th>Age</th><th>Strategy</th>
+            <th>Ticker</th><th>Direction</th><th>Entry</th><th>Stop</th>
+            <th>Volume</th><th>Age</th><th>Strategy</th>
           </tr></thead>
           <tbody>{rows_html}</tbody>
         </table>
@@ -392,7 +631,7 @@ def _render_options():
         df = _fetch_options(cache_key)
 
     if df.empty:
-        st.markdown('<div class="no-data">No qualifying options setups found.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="no-data">🔍 No qualifying options setups found right now.</div>', unsafe_allow_html=True)
     else:
         rows_html = ""
         for _, r in df.iterrows():
@@ -404,24 +643,24 @@ def _render_options():
             score = f'{float(r["Score"]):.1f}' if pd.notna(r.get("Score")) else "—"
             strike = str(int(r["Strike"])) if pd.notna(r.get("Strike")) else "—"
             greeks_ok = str(r.get("Greeks OK", "—"))
-            ok_icon = "✅" if "✅" in greeks_ok else "❌"
+            ok_icon = "✅" if "✅" in greeks_ok else "⚠️"
             rows_html += f"""
             <tr>
               <td><span class="ticker">{r['Symbol']}</span></td>
               <td><span class="{dir_class}">{direction}</span></td>
-              <td>{strike}</td>
-              <td class="green">{premium}</td>
-              <td>{delta}</td>
-              <td style="color:#f87171">{theta}</td>
-              <td style="color:#e2e8f0">{score}</td>
-              <td style="text-align:center">{ok_icon}</td>
+              <td class="price">{strike}</td>
+              <td class="price green">{premium}</td>
+              <td class="price">{delta}</td>
+              <td class="price red">{theta}</td>
+              <td class="price">{score}</td>
+              <td style="text-align:center; font-size: 16px;">{ok_icon}</td>
             </tr>"""
 
         st.markdown(f"""
         <table class="dash-tbl">
           <thead><tr>
             <th>Symbol</th><th>Type</th><th>Strike</th><th>Premium</th>
-            <th>Delta</th><th>Theta/d</th><th>Score</th><th>Greeks</th>
+            <th>Delta</th><th>Theta/Day</th><th>Score</th><th>Greeks</th>
           </tr></thead>
           <tbody>{rows_html}</tbody>
         </table>
@@ -452,9 +691,9 @@ def _render_events():
         if is_earnings:
             badge = '<span class="imp-earn">EARNINGS</span>'
         elif impact == "HIGH":
-            badge = '<span class="imp-high">HIGH</span>'
+            badge = '<span class="imp-high">⚠️ HIGH</span>'
         elif impact == "MEDIUM":
-            badge = '<span class="imp-medium">MED</span>'
+            badge = '<span class="imp-medium">📊 MEDIUM</span>'
         else:
             continue  # skip LOW impact
 
@@ -469,7 +708,7 @@ def _render_events():
     if html:
         st.markdown(html, unsafe_allow_html=True)
     else:
-        st.markdown('<div class="no-data">No major events or earnings today.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="no-data">📅 No major events or earnings today.</div>', unsafe_allow_html=True)
 
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -502,29 +741,50 @@ def main():
     time_str = now.strftime("%I:%M %p ET")
     date_str = now.strftime("%A, %b %d %Y")
 
-    st.markdown(f"""
-    <div class="status-bar">
-      <div>{dot}<span class="val">{status_text}</span></div>
-      <div><span class="label">Time</span>&nbsp;<span class="val">{time_str}</span></div>
-      <div><span class="label">Date</span>&nbsp;<span class="val">{date_str}</span></div>
+    # ── Breadcrumb Navigation ──────────────────────────────────────────────────
+    st.markdown("""
+    <div class="breadcrumb">
+      <span style="color: #f5f7fa; font-weight: 500;">📊 Home</span>
+      <span class="breadcrumb-sep">›</span>
+      <span style="color: #cbd5e1;">Morning Briefing</span>
     </div>
     """, unsafe_allow_html=True)
 
-    # Header with refresh + link to full scanner dashboard
-    hcol1, hcol2, hcol3 = st.columns([4, 1, 1])
+    # ── Status Bar ─────────────────────────────────────────────────────────────
+    st.markdown(f"""
+    <div class="status-bar">
+      <div style="display: flex; align-items: center; gap: 6px;">
+        {dot}<span class="val">{status_text}</span>
+      </div>
+      <div style="border-left: 1px solid #334155; padding-left: 24px;">
+        <span class="label">Time</span>&nbsp;<span class="val">{time_str}</span>
+      </div>
+      <div>
+        <span class="label">Date</span>&nbsp;<span class="val">{date_str}</span>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Page Header ────────────────────────────────────────────────────────────
+    st.markdown("""
+    <div class="page-header">
+      <h1 class="page-title">📈 Morning Briefing</h1>
+      <p class="page-subtitle">Today's trading setups, breakouts, and market events</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Scan info and controls ─────────────────────────────────────────────────
+    n = len(SCAN_UNIVERSE)
+    hcol1, hcol2, hcol3 = st.columns([3, 1, 1])
     with hcol1:
-        st.markdown("## Trading Dashboard")
-        n = len(SCAN_UNIVERSE)
-        st.markdown(f'<span class="refresh-info">Scanning {n} tickers · cache 5 min market hours · 1 hr pre/post</span>',
-                    unsafe_allow_html=True)
+        st.markdown(
+            f'<p class="page-meta">Scanning **{n}** tickers · Cache: 5 min (market hours) / 1 hr (pre-post) · Auto-refresh enabled</p>',
+            unsafe_allow_html=True
+        )
     with hcol2:
-        st.write("")
-        st.write("")
-        st.link_button("Full Dashboard →", "http://localhost:8502", use_container_width=True)
+        st.link_button("📊 Full Dashboard", "http://localhost:8502", use_container_width=True)
     with hcol3:
-        st.write("")
-        st.write("")
-        if st.button("↺ Refresh", use_container_width=True):
+        if st.button("↺ Refresh Now", use_container_width=True, key="refresh_btn"):
             st.cache_data.clear()
             st.rerun()
 
