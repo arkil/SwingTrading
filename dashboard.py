@@ -113,248 +113,321 @@ T = _DARK_THEME if DARK_MODE else _LIGHT_THEME
 
 # ── Global CSS ────────────────────────────────────────────────────────────────
 
-st.markdown(f"""
+st.markdown("""
 <style>
-:root {{ color-scheme: {T['color_scheme']}; }}
-/* ── Base scroll ───────────────────────────────────────────────────── */
-html, body {{ overflow-y: auto !important; scroll-behavior: smooth; }}
-[data-testid="stAppViewContainer"] {{ overflow-y: auto !important; height: auto !important; background: {T['main_bg']} !important; }}
-[data-testid="stMain"], section.main {{ overflow-y: visible !important; height: auto !important; background: {T['main_bg']} !important; color: {T['main_text']} !important; }}
-.block-container {{
-    padding-top: 2rem !important;
-    padding-left: 3rem !important;
-    padding-right: 3rem !important;
-    overflow: visible !important;
-    max-height: none !important;
+html, body { overflow-y: auto !important; }
+.block-container {
+    padding: 2rem 3rem 3rem !important;
     max-width: 1600px;
-}}
-[data-testid="stDataFrame"], .stDataFrame {{ overflow: auto !important; }}
-[data-testid="stMarkdownContainer"] > div {{ overflow: visible !important; }}
+}
 
-/* ── Sidebar — always open, never collapsible ──────────────────────── */
-[data-testid="stSidebar"] {{
-    background: {T['sidebar_bg']} !important;
-    min-width: 260px !important;
-    max-width: 290px !important;
-    /* Override Streamlit's collapsed transform */
-    display: flex !important;
-    visibility: visible !important;
-    transform: none !important;
-    margin-left: 0 !important;
-    position: sticky !important;
-}}
-/* Also override when aria-expanded=false (collapsed state) */
-section[data-testid="stSidebar"][aria-expanded="false"] {{
-    display: flex !important;
-    transform: none !important;
-    margin-left: 0 !important;
-    min-width: 260px !important;
-}}
-/* Hide the collapse / expand toggle buttons entirely */
-[data-testid="stSidebarCollapseButton"],
-[data-testid="collapsedControl"],
-button[aria-label="Close sidebar"],
-button[aria-label="Open sidebar"],
-button[aria-label="Collapse sidebar"],
-button[aria-label="Expand sidebar"] {{ display: none !important; }}
-
-[data-testid="stSidebar"] > div:first-child {{
-    background: {T['sidebar_bg']} !important;
-    overflow-y: auto !important;
-    overflow-x: hidden !important;
-    height: 100vh;
-    min-width: 260px !important;
-    padding: 1.2rem 0.8rem 1.2rem !important;
-    box-sizing: border-box;
-}}
-
-/* ── Sidebar text & labels ─────────────────────────────────────────── */
-[data-testid="stSidebar"] p,
-[data-testid="stSidebar"] span,
-[data-testid="stSidebar"] label {{ color: {T['text_muted']} !important; }}
-[data-testid="stSidebar"] .stCaption {{ color: {T['text_caption']} !important; font-size: 11px !important; }}
-[data-testid="stSidebar"] hr {{ border-color: {T['hr_border']} !important; margin: 8px 0 !important; }}
-[data-testid="stSidebar"] [data-testid="stCheckbox"] label {{ font-size: 12px !important; }}
-/* Search input */
-[data-testid="stSidebar"] input[type="text"] {{
-    background: {T['input_bg']} !important;
-    border: 1px solid {T['input_border']} !important;
-    border-radius: 8px !important;
-    color: {T['input_text']} !important;
-    font-size: 13px !important;
-    padding: 6px 10px !important;
-}}
-[data-testid="stSidebar"] input[type="text"]::placeholder {{ color: {T['input_placeholder']} !important; }}
-[data-testid="stSidebar"] input[type="text"]:focus {{
-    border-color: #3b82f6 !important;
-    box-shadow: 0 0 0 2px rgba(59,130,246,0.2) !important;
-    outline: none !important;
-}}
-
-/* ── Nav group headers ─────────────────────────────────────────────── */
-.nav-group-hdr {{
-    font-size: 10.5px;
-    font-weight: 800;
-    letter-spacing: 1.2px;
-    color: {T['hdr_color']} !important;
-    text-transform: uppercase;
-    padding: 16px 4px 5px;
-    margin: 0;
-    line-height: 1;
-    border-top: 1px solid {T['hdr_border']};
-}}
-.nav-group-hdr-first {{
-    border-top: none !important;
-    padding-top: 6px !important;
-}}
-
-/* ── Inactive nav buttons ──────────────────────────────────────────── */
-[data-testid="stSidebar"] .stButton > button {{
-    background: transparent !important;
-    border: none !important;
-    border-left: 3px solid transparent !important;
-    color: {T['text_muted']} !important;
-    text-align: left !important;
-    padding: 8px 10px 8px 9px !important;
-    font-size: 13.5px !important;
-    font-weight: 400 !important;
-    border-radius: 7px !important;
-    width: 100% !important;
-    margin: 1px 0 !important;
-    transition: background 0.12s, color 0.12s !important;
-    line-height: 1.35 !important;
-    justify-content: flex-start !important;
-    box-shadow: none !important;
-}}
-[data-testid="stSidebar"] .stButton > button:hover {{
-    background: {T['nav_hover_bg']} !important;
-    color: {T['nav_hover_text']} !important;
-    border-left: 3px solid {T['nav_hover_border']} !important;
-    box-shadow: none !important;
-}}
-[data-testid="stSidebar"] .stButton > button:focus {{
-    box-shadow: none !important;
-    outline: none !important;
-}}
-
-/* ── Nav link items (anchor links — right-click → Open in New Tab) ─── */
-.nav-link {{
-    display: block !important;
-    padding: 7px 10px !important;
-    border-radius: 6px !important;
-    color: {T['text_muted']} !important;
-    text-decoration: none !important;
-    font-size: 13.5px !important;
-    margin: 1px 0 !important;
-    line-height: 1.35 !important;
-    transition: background 0.12s, color 0.12s !important;
-    cursor: pointer !important;
-}}
-.nav-link:hover {{
-    background: {T['navlink_hover_bg']} !important;
-    color: {T['nav_hover_text']} !important;
-    text-decoration: none !important;
-}}
-
-/* ── Active nav item (HTML div — not a button) ─────────────────────── */
-.nav-active-item {{
-    background: rgba(59,130,246,0.16) !important;
-    color: {T['active_text']} !important;
-    font-weight: 600 !important;
-    border-left: 3px solid #3b82f6 !important;
-    border-radius: 7px !important;
-    padding: 8px 10px 8px 9px !important;
-    font-size: 13.5px !important;
-    margin: 1px 0 !important;
-    cursor: default;
-    display: block;
-    user-select: none;
-    line-height: 1.35;
-}}
-
-/* ── Hide Streamlit toolbar & deploy button ────────────────────────── */
-/* Hide all Streamlit chrome — sidebar toggle is hidden separately above */
-[data-testid="stToolbar"],
-[data-testid="stDecoration"],
-[data-testid="stStatusWidget"],
-#MainMenu,
-header[data-testid="stHeader"] {{ display: none !important; }}
-
-/* ── Metric cards ──────────────────────────────────────────────────── */
-div[data-testid="metric-container"] {{
-    background: {T['metric_bg']};
-    border: 1px solid {T['metric_border']};
-    border-radius: 8px;
-    padding: 16px 20px;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-}}
-
-/* ── General button polish ─────────────────────────────────────────── */
-button[kind="primary"] {{
-    border-radius: 6px;
-    height: 40px;
-    font-size: 14px;
-    font-weight: 600;
-}}
-.stButton > button {{
-    border-radius: 6px;
-    height: 40px;
-    font-size: 14px;
-    font-weight: 600;
-    transition: all 150ms ease;
-}}
-.stButton > button:focus {{
-    outline: 2px solid #2563eb !important;
-    outline-offset: 2px !important;
-}}
-
-/* ── Breadcrumb Navigation ─────────────────────────────────────────── */
-.breadcrumb {{
+/* === BREADCRUMB === */
+.breadcrumb {
     display: flex;
     align-items: center;
     gap: 8px;
     margin-bottom: 24px;
     font-size: 13px;
-    color: {T['text_muted']};
-}}
-.breadcrumb a {{ color: #2563eb; text-decoration: none; }}
-.breadcrumb a:hover {{ text-decoration: underline; }}
-.breadcrumb-sep {{ color: {T['hdr_color']}; }}
+    color: #94a3b8;
+}
+.breadcrumb a {
+    color: #2563eb;
+    text-decoration: none;
+}
+.breadcrumb a:hover {
+    text-decoration: underline;
+}
+.breadcrumb-sep {
+    color: #64748b;
+}
 
-/* ── Page Header Section ───────────────────────────────────────────── */
-.page-header {{
+/* === HEADER SECTION === */
+.page-header {
     margin-bottom: 32px;
-}}
-.page-title {{
+}
+.page-title {
     font-size: 32px;
     font-weight: 600;
-    color: {T['main_text']};
+    color: #f5f7fa;
     margin: 0 0 8px 0;
     line-height: 1.2;
-}}
-.page-subtitle {{
+}
+.page-subtitle {
     font-size: 14px;
-    color: {T['text_muted']};
+    color: #cbd5e1;
     margin: 0 0 16px 0;
-}}
-.page-meta {{
+}
+.page-meta {
     font-size: 13px;
-    color: {T['hdr_color']};
-}}
+    color: #94a3b8;
+}
 
-/* ── Scanner page headers ──────────────────────────────────────────── */
-.scanner-header  {{ display:flex; align-items:center; gap:12px; margin-bottom:4px; }}
-.scanner-title   {{ font-size:2rem; font-weight:700; margin-bottom: 8px; }}
-.scanner-desc    {{ color:{T['scanner_desc']}; font-size:0.9rem; margin-bottom:1.5rem; }}
+/* === STATUS BAR === */
+.status-bar {
+    display: flex;
+    gap: 24px;
+    align-items: center;
+    background: #1a2332;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 12px 20px;
+    margin-bottom: 32px;
+    font-size: 13px;
+    color: #cbd5e1;
+}
+.status-bar .label {
+    color: #94a3b8;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 600;
+}
+.status-bar .val   {
+    color: #f5f7fa;
+    font-weight: 600;
+    font-size: 14px;
+}
+.status-bar .dot-open  {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #10b981;
+    display: inline-block;
+    margin-right: 6px;
+}
+.status-bar .dot-closed {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #ef4444;
+    display: inline-block;
+    margin-right: 6px;
+}
 
-/* ── Expander polish ───────────────────────────────────────────────── */
-[data-testid="stExpander"] {{
-    border: 1px solid {T['expander_border']} !important;
-    border-radius: 10px !important;
-}}
+/* === SECTION CARD === */
+.dash-card {
+    background: #1a2332;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 24px;
+    margin-bottom: 32px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+.dash-card h3 {
+    color: #f5f7fa;
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: 0;
+    margin: 0 0 16px 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
 
-/* ── Tab strip ─────────────────────────────────────────────────────── */
-[data-testid="stTabs"] [data-testid="stTab"] {{ font-size: 13px; }}
+/* === SIGNAL BADGES === */
+.sig-strong {
+    background: rgba(16, 185, 129, 0.15);
+    color: #10b981;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid rgba(16, 185, 129, 0.3);
+}
+.sig-buy    {
+    background: rgba(16, 185, 129, 0.1);
+    color: #10b981;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid rgba(16, 185, 129, 0.2);
+}
+.sig-watch  {
+    background: rgba(245, 158, 11, 0.1);
+    color: #f59e0b;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid rgba(245, 158, 11, 0.2);
+}
+.sig-call   {
+    background: rgba(16, 185, 129, 0.1);
+    color: #10b981;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid rgba(16, 185, 129, 0.2);
+}
+.sig-put    {
+    background: rgba(239, 68, 68, 0.1);
+    color: #ef4444;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid rgba(239, 68, 68, 0.2);
+}
+.sig-bo     {
+    background: rgba(59, 130, 246, 0.1);
+    color: #3b82f6;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid rgba(59, 130, 246, 0.2);
+}
+
+/* === IMPACT BADGES === */
+.imp-high   {
+    background: rgba(239, 68, 68, 0.1);
+    color: #ef4444;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid rgba(239, 68, 68, 0.2);
+}
+.imp-medium {
+    background: rgba(245, 158, 11, 0.1);
+    color: #f59e0b;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid rgba(245, 158, 11, 0.2);
+}
+.imp-earn   {
+    background: rgba(6, 182, 212, 0.1);
+    color: #06b6d4;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid rgba(6, 182, 212, 0.2);
+}
+
+/* === TICKER & PRICE STYLES === */
+.ticker {
+    font-size: 15px;
+    font-weight: 700;
+    color: #f5f7fa;
+    letter-spacing: 0.5px;
+    min-width: 50px;
+}
+.price  {
+    font-size: 14px;
+    color: #cbd5e1;
+    font-family: "SF Mono", Monaco, monospace;
+}
+.green  {
+    color: #10b981;
+    font-weight: 600;
+}
+.red    {
+    color: #ef4444;
+    font-weight: 600;
+}
+
+/* === DATA TABLE === */
+table.dash-tbl {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+}
+table.dash-tbl th {
+    color: #cbd5e1;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 12px 16px;
+    border-bottom: 1px solid #334155;
+    text-align: left;
+    font-weight: 600;
+    background: #0f1419;
+}
+table.dash-tbl td {
+    padding: 14px 16px;
+    border-bottom: 1px solid #1e293b;
+    color: #f5f7fa;
+    vertical-align: middle;
+    font-variant-numeric: tabular-nums;
+}
+table.dash-tbl tr:hover td {
+    background: #252d47;
+}
+table.dash-tbl tr:last-child td {
+    border-bottom: none;
+}
+
+/* === EVENT ROW === */
+.event-row {
+    padding: 12px 0;
+    border-bottom: 1px solid #1e293b;
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+}
+.event-row:last-child {
+    border-bottom: none;
+}
+.event-time {
+    color: #94a3b8;
+    font-size: 12px;
+    min-width: 70px;
+    padding-top: 2px;
+    font-weight: 500;
+}
+.event-name {
+    color: #f5f7fa;
+    font-size: 14px;
+    flex: 1;
+}
+
+/* === EMPTY STATE === */
+.no-data {
+    color: #94a3b8;
+    font-size: 14px;
+    padding: 2rem 1rem;
+    text-align: center;
+    background: #0f1419;
+    border-radius: 6px;
+    border: 1px dashed #334155;
+}
+
+/* === INFO TEXT === */
+.refresh-info {
+    color: #94a3b8;
+    font-size: 13px;
+}
+
+/* === FOCUS STATES === */
+button:focus-visible {
+    outline: 2px solid #2563eb !important;
+    outline-offset: 2px !important;
+}
+
+/* === STREAMLIT BUTTON OVERRIDES === */
+.stButton > button {
+    height: 40px;
+    font-size: 14px;
+    font-weight: 600;
+    border-radius: 6px;
+    border: 1px solid #334155 !important;
+    background-color: #2563eb !important;
+    color: white !important;
+    transition: all 150ms ease;
+}
+.stButton > button:hover {
+    background-color: #1e40af !important;
+    border-color: #2563eb !important;
+}
+.stButton > button:focus {
+    outline: 2px solid #2563eb !important;
+    outline-offset: 2px !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
