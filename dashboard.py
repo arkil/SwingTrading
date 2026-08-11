@@ -428,6 +428,57 @@ button:focus-visible {
     outline: 2px solid #2563eb !important;
     outline-offset: 2px !important;
 }
+
+/* === SIDEBAR NAVIGATION === */
+.nav-group-hdr {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    color: #94a3b8;
+    text-transform: uppercase;
+    padding: 12px 0 6px 0;
+    margin: 8px 0 0 0;
+    line-height: 1;
+    border-top: 1px solid #334155;
+}
+.nav-group-hdr:first-child {
+    border-top: none;
+    padding-top: 0;
+    margin-top: 0;
+}
+
+.nav-link {
+    display: block !important;
+    padding: 8px 12px !important;
+    border-radius: 6px !important;
+    color: #cbd5e1 !important;
+    text-decoration: none !important;
+    font-size: 13px !important;
+    margin: 2px 0 !important;
+    line-height: 1.4 !important;
+    transition: all 120ms ease !important;
+    cursor: pointer !important;
+}
+.nav-link:hover {
+    background: rgba(37, 99, 235, 0.15) !important;
+    color: #e0e7ff !important;
+    text-decoration: none !important;
+}
+
+.nav-active-item {
+    background: rgba(37, 99, 235, 0.2) !important;
+    color: #93c5fd !important;
+    font-weight: 600 !important;
+    border-left: 3px solid #2563eb !important;
+    border-radius: 6px !important;
+    padding: 8px 12px 8px 9px !important;
+    font-size: 13px !important;
+    margin: 2px 0 !important;
+    cursor: default;
+    display: block;
+    user-select: none;
+    line-height: 1.4;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -11329,7 +11380,6 @@ SCANNERS = [
 ]
 
 SCANNER_GROUPS = [
-    {"id": "home",      "label": "HOME",          "icon": "🏠"},
     {"id": "analyze",   "label": "ANALYZE",       "icon": "🔍"},
     {"id": "trades",    "label": "TRADE SETUPS",  "icon": "🎯"},
     {"id": "technical", "label": "TECHNICAL",     "icon": "📊"},
@@ -11384,6 +11434,22 @@ with st.sidebar:
         key="sidebar_search", label_visibility="collapsed",
     )
     search_q = nav_search.strip().lower()
+
+    # ── Home link (no group header) ────────────────────────────────────────────
+    home_scanner = SCANNERS_BY_ID["home"]
+    is_home_active = (active_id == "home")
+    if not search_q or search_q in home_scanner["label"].lower():
+        if is_home_active:
+            st.markdown(
+                f"<div class='nav-active-item'>{home_scanner['label']}</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f"<a href='?scanner=home' class='nav-link'>{home_scanner['label']}</a>",
+                unsafe_allow_html=True,
+            )
+        st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
 
     first_group = True
 
