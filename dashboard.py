@@ -48,78 +48,22 @@ import yfinance as yf
 from datetime import datetime, timedelta
 from collections import Counter
 import pytz
+from strategy_improvements import StrategyOptimizer
 import glob
 import time
 import warnings
 warnings.filterwarnings("ignore")
+
+import backtest_badges
 
 from livermore_pivotal_screener import (
     run_screener, get_universe, get_sp500_tickers, get_nasdaq100_tickers,
     classify_pivotal_points, continuation_pivot,
     DEFAULT_TICKERS, WATCHLIST_TICKERS, _dedup,
 )
-from ema_crossover_screener import (
-    run_ema_screener, detect_crossovers, PRESETS as EMA_PRESETS,
-)
-from breakout_screener import (
-    run_breakout_screener, run_all_strategies, add_base_indicators,
-    STRATEGY_GROUPS, STRATEGY_LABELS,
-)
-from minervini_screener import (
-    run_minervini_screener, check_trend_template,
-    _sma as _msma,
-)
-from astro_scanner import (
-    run_astro_scanner, compute_market_bias, get_current_moon,
-    get_retrograde_status, get_planetary_aspects,
-    get_upcoming_events as get_astro_events,
-    get_moon_event_dates, analyze_moon_returns, find_gann_cycle_dates,
-    get_karana, is_vishti, backtest_vishti,
-    get_rahu_ketu, get_moon_nakshatra, get_vedic_planets,
-    compute_vedic_daily_score, build_prediction_calendar,
-    get_decade_cheatsheet, get_annual_roadmap,
-    generate_annual_forecast, generate_multi_year_outlook,
-)
-from rsi_screener import run_rsi_screener, detect_rsi_signals
-from macd_screener import run_macd_screener, detect_macd_signals
-from gap_screener import run_gap_screener, detect_gaps, run_live_gap_screener
-from combined_screener import run_combined_screener
-from swing_options_screener import run_swing_options_screener
-from ibd_scanner import run_ibd_scanner
-from backtest_strategy import run_strategy_backtest
-from stock_analyzer_module import render_stock_analyzer
-from spy_reversal_log import (
-    sync_from_alpaca as _spy_sync,
-    load_logs as _spy_load_logs,
-    get_records as _spy_get_records,
-    available_dates as _spy_available_dates,
-    pair_trades as _spy_pair_trades,
-    parse_orders as _spy_parse_orders,
-)
-from options_trade_log import (
-    sync_from_alpaca as _opt_sync,
-    load_logs as _opt_load_logs,
-    get_records as _opt_get_records,
-    available_dates as _opt_available_dates,
-    pair_trades as _opt_pair_trades,
-    parse_orders as _opt_parse_orders,
-)
-from options_backtest_runner import run_options_backtest
-from economic_calendar import (
-    get_upcoming_events,
-    get_news_feed,
-    get_event_context,
-    get_earnings_calendar,
-    _CATEGORY_META as _CAL_META,
-)
-from alpaca_trader import (
-    make_client, get_account_summary, is_market_open_alpaca,
-    get_positions, get_open_orders,
-    get_todays_trades, get_portfolio_history,
-    close_position, close_all_positions,
-    cancel_order, cancel_all_orders,
-    execute_alerts as alpaca_execute_alerts,
-)
+# Scanner-specific modules are lazy-loaded inside their render functions
+# to reduce startup time. Only the livermore module (with shared constants
+# WATCHLIST_TICKERS, _dedup, get_sp500/ndq tickers) stays at module level.
 
 # ── Page config ───────────────────────────────────────────────────────────────
 
@@ -132,69 +76,147 @@ st.set_page_config(
 
 SCREENER_DIR = os.path.join(os.path.dirname(__file__), "screener_output")
 
+# ── Theme (light/dark toggle, persisted in session_state) ─────────────────────
+
+if "dark_mode" not in st.session_state:
+    st.session_state["dark_mode"] = True
+DARK_MODE = st.session_state["dark_mode"]
+PLOTLY_TEMPLATE = "plotly_dark" if DARK_MODE else "plotly_white"
+
+_DARK_THEME = {
+    "main_bg": "#0e1117", "main_text": "#fafafa",
+    "sidebar_bg": "#0f172a", "text_muted": "#94a3b8", "text_caption": "#475569",
+    "hr_border": "#1e293b", "input_bg": "#1e293b", "input_border": "#334155",
+    "input_text": "#e2e8f0", "input_placeholder": "#475569",
+    "hdr_color": "#475569", "hdr_border": "#1e293b",
+    "nav_hover_bg": "rgba(148,163,184,0.12)", "nav_hover_text": "#e2e8f0",
+    "nav_hover_border": "#475569", "navlink_hover_bg": "rgba(255,255,255,0.07)",
+    "active_text": "#93c5fd", "metric_bg": "rgba(255,255,255,0.03)",
+    "metric_border": "rgba(255,255,255,0.08)", "scanner_desc": "#999",
+    "expander_border": "rgba(255,255,255,0.07)", "logo_color": "#e2e8f0",
+    "color_scheme": "dark",
+}
+_LIGHT_THEME = {
+    "main_bg": "#ffffff", "main_text": "#0f172a",
+    "sidebar_bg": "#f8fafc", "text_muted": "#475569", "text_caption": "#94a3b8",
+    "hr_border": "#e2e8f0", "input_bg": "#ffffff", "input_border": "#cbd5e1",
+    "input_text": "#0f172a", "input_placeholder": "#94a3b8",
+    "hdr_color": "#64748b", "hdr_border": "#e2e8f0",
+    "nav_hover_bg": "rgba(100,116,139,0.10)", "nav_hover_text": "#0f172a",
+    "nav_hover_border": "#94a3b8", "navlink_hover_bg": "rgba(0,0,0,0.05)",
+    "active_text": "#1d4ed8", "metric_bg": "rgba(0,0,0,0.03)",
+    "metric_border": "rgba(0,0,0,0.08)", "scanner_desc": "#666",
+    "expander_border": "rgba(0,0,0,0.08)", "logo_color": "#0f172a",
+    "color_scheme": "light",
+}
+T = _DARK_THEME if DARK_MODE else _LIGHT_THEME
+
 # ── Global CSS ────────────────────────────────────────────────────────────────
 
-st.markdown("""
+st.markdown(f"""
 <style>
+:root {{ color-scheme: {T['color_scheme']}; }}
 /* ── Base scroll ───────────────────────────────────────────────────── */
-html, body { overflow-y: auto !important; scroll-behavior: smooth; }
-[data-testid="stAppViewContainer"] { overflow-y: auto !important; height: auto !important; }
-[data-testid="stMain"], section.main { overflow-y: visible !important; height: auto !important; }
-.block-container {
-    padding-top: 1.5rem !important;
-    padding-left: 2rem !important;
-    padding-right: 2rem !important;
+html, body {{ overflow-y: auto !important; scroll-behavior: smooth; }}
+[data-testid="stAppViewContainer"] {{ overflow-y: auto !important; height: auto !important; background: {T['main_bg']} !important; }}
+[data-testid="stMain"], section.main {{ overflow-y: visible !important; height: auto !important; background: {T['main_bg']} !important; color: {T['main_text']} !important; }}
+.block-container {{
+    padding-top: 2rem !important;
+    padding-left: 3rem !important;
+    padding-right: 3rem !important;
     overflow: visible !important;
     max-height: none !important;
-    max-width: 1400px;
-}
-[data-testid="stDataFrame"], .stDataFrame { overflow: auto !important; }
-[data-testid="stMarkdownContainer"] > div { overflow: visible !important; }
+    max-width: 1600px;
+}}
+[data-testid="stDataFrame"], .stDataFrame {{ overflow: auto !important; }}
+[data-testid="stMarkdownContainer"] > div {{ overflow: visible !important; }}
 
-/* ── Sidebar dark theme ────────────────────────────────────────────── */
-[data-testid="stSidebar"] {
-    background: #0f172a !important;
-    min-width: 230px !important;
-    max-width: 270px !important;
-}
-[data-testid="stSidebar"] > div:first-child {
-    background: #0f172a !important;
+/* ── Sidebar — always open, never collapsible ──────────────────────── */
+[data-testid="stSidebar"] {{
+    background: {T['sidebar_bg']} !important;
+    min-width: 260px !important;
+    max-width: 290px !important;
+    /* Override Streamlit's collapsed transform */
+    display: flex !important;
+    visibility: visible !important;
+    transform: none !important;
+    margin-left: 0 !important;
+    position: sticky !important;
+}}
+/* Also override when aria-expanded=false (collapsed state) */
+section[data-testid="stSidebar"][aria-expanded="false"] {{
+    display: flex !important;
+    transform: none !important;
+    margin-left: 0 !important;
+    min-width: 260px !important;
+}}
+/* Hide the collapse / expand toggle buttons entirely */
+[data-testid="stSidebarCollapseButton"],
+[data-testid="collapsedControl"],
+button[aria-label="Close sidebar"],
+button[aria-label="Open sidebar"],
+button[aria-label="Collapse sidebar"],
+button[aria-label="Expand sidebar"] {{ display: none !important; }}
+
+[data-testid="stSidebar"] > div:first-child {{
+    background: {T['sidebar_bg']} !important;
     overflow-y: auto !important;
     overflow-x: hidden !important;
     height: 100vh;
-    min-width: 230px !important;
-    padding: 1.4rem 0.9rem 1rem !important;
+    min-width: 260px !important;
+    padding: 1.2rem 0.8rem 1.2rem !important;
     box-sizing: border-box;
-}
+}}
 
 /* ── Sidebar text & labels ─────────────────────────────────────────── */
 [data-testid="stSidebar"] p,
 [data-testid="stSidebar"] span,
-[data-testid="stSidebar"] label { color: #94a3b8 !important; }
-[data-testid="stSidebar"] .stCaption { color: #475569 !important; font-size: 11px !important; }
-[data-testid="stSidebar"] hr { border-color: #1e293b !important; }
-[data-testid="stSidebar"] [data-testid="stCheckbox"] label { font-size: 12px !important; }
+[data-testid="stSidebar"] label {{ color: {T['text_muted']} !important; }}
+[data-testid="stSidebar"] .stCaption {{ color: {T['text_caption']} !important; font-size: 11px !important; }}
+[data-testid="stSidebar"] hr {{ border-color: {T['hr_border']} !important; margin: 8px 0 !important; }}
+[data-testid="stSidebar"] [data-testid="stCheckbox"] label {{ font-size: 12px !important; }}
+/* Search input */
+[data-testid="stSidebar"] input[type="text"] {{
+    background: {T['input_bg']} !important;
+    border: 1px solid {T['input_border']} !important;
+    border-radius: 8px !important;
+    color: {T['input_text']} !important;
+    font-size: 13px !important;
+    padding: 6px 10px !important;
+}}
+[data-testid="stSidebar"] input[type="text"]::placeholder {{ color: {T['input_placeholder']} !important; }}
+[data-testid="stSidebar"] input[type="text"]:focus {{
+    border-color: #3b82f6 !important;
+    box-shadow: 0 0 0 2px rgba(59,130,246,0.2) !important;
+    outline: none !important;
+}}
 
 /* ── Nav group headers ─────────────────────────────────────────────── */
-.nav-group-hdr {
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 1.4px;
-    color: #475569 !important;
+.nav-group-hdr {{
+    font-size: 10.5px;
+    font-weight: 800;
+    letter-spacing: 1.2px;
+    color: {T['hdr_color']} !important;
     text-transform: uppercase;
-    padding: 14px 6px 5px;
+    padding: 16px 4px 5px;
     margin: 0;
     line-height: 1;
-}
+    border-top: 1px solid {T['hdr_border']};
+}}
+.nav-group-hdr-first {{
+    border-top: none !important;
+    padding-top: 6px !important;
+}}
 
-/* ── Nav buttons ───────────────────────────────────────────────────── */
-[data-testid="stSidebar"] .stButton > button {
+/* ── Inactive nav buttons ──────────────────────────────────────────── */
+[data-testid="stSidebar"] .stButton > button {{
     background: transparent !important;
     border: none !important;
-    color: #94a3b8 !important;
+    border-left: 3px solid transparent !important;
+    color: {T['text_muted']} !important;
     text-align: left !important;
-    padding: 7px 10px !important;
-    font-size: 13px !important;
+    padding: 8px 10px 8px 9px !important;
+    font-size: 13.5px !important;
     font-weight: 400 !important;
     border-radius: 7px !important;
     width: 100% !important;
@@ -203,61 +225,136 @@ html, body { overflow-y: auto !important; scroll-behavior: smooth; }
     line-height: 1.35 !important;
     justify-content: flex-start !important;
     box-shadow: none !important;
-}
-[data-testid="stSidebar"] .stButton > button:hover {
-    background: rgba(148,163,184,0.1) !important;
-    color: #e2e8f0 !important;
-    border: none !important;
+}}
+[data-testid="stSidebar"] .stButton > button:hover {{
+    background: {T['nav_hover_bg']} !important;
+    color: {T['nav_hover_text']} !important;
+    border-left: 3px solid {T['nav_hover_border']} !important;
     box-shadow: none !important;
-}
-[data-testid="stSidebar"] .stButton > button:focus {
+}}
+[data-testid="stSidebar"] .stButton > button:focus {{
     box-shadow: none !important;
     outline: none !important;
-    border: none !important;
-}
+}}
 
-/* ── Active nav button (element after .nav-active-marker) ──────────── */
-[data-testid="stSidebar"] [data-testid="stMarkdownContainer"]:has(.nav-active-marker) + div .stButton > button,
-[data-testid="stSidebar"] [data-testid="stMarkdownContainer"]:has(.nav-active-marker) + div > div > .stButton > button {
-    background: rgba(59,130,246,0.14) !important;
-    color: #93c5fd !important;
+/* ── Nav link items (anchor links — right-click → Open in New Tab) ─── */
+.nav-link {{
+    display: block !important;
+    padding: 7px 10px !important;
+    border-radius: 6px !important;
+    color: {T['text_muted']} !important;
+    text-decoration: none !important;
+    font-size: 13.5px !important;
+    margin: 1px 0 !important;
+    line-height: 1.35 !important;
+    transition: background 0.12s, color 0.12s !important;
+    cursor: pointer !important;
+}}
+.nav-link:hover {{
+    background: {T['navlink_hover_bg']} !important;
+    color: {T['nav_hover_text']} !important;
+    text-decoration: none !important;
+}}
+
+/* ── Active nav item (HTML div — not a button) ─────────────────────── */
+.nav-active-item {{
+    background: rgba(59,130,246,0.16) !important;
+    color: {T['active_text']} !important;
     font-weight: 600 !important;
     border-left: 3px solid #3b82f6 !important;
-    padding-left: 7px !important;
-}
+    border-radius: 7px !important;
+    padding: 8px 10px 8px 9px !important;
+    font-size: 13.5px !important;
+    margin: 1px 0 !important;
+    cursor: default;
+    display: block;
+    user-select: none;
+    line-height: 1.35;
+}}
 
 /* ── Hide Streamlit toolbar & deploy button ────────────────────────── */
+/* Hide all Streamlit chrome — sidebar toggle is hidden separately above */
 [data-testid="stToolbar"],
 [data-testid="stDecoration"],
 [data-testid="stStatusWidget"],
 #MainMenu,
-header[data-testid="stHeader"] { display: none !important; }
+header[data-testid="stHeader"] {{ display: none !important; }}
 
 /* ── Metric cards ──────────────────────────────────────────────────── */
-div[data-testid="metric-container"] {
-    background: rgba(255,255,255,0.03);
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 10px;
-    padding: 12px 16px;
-}
+div[data-testid="metric-container"] {{
+    background: {T['metric_bg']};
+    border: 1px solid {T['metric_border']};
+    border-radius: 8px;
+    padding: 16px 20px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}}
 
 /* ── General button polish ─────────────────────────────────────────── */
-button[kind="primary"] { border-radius: 8px; }
-.stButton > button { border-radius: 8px; }
+button[kind="primary"] {{
+    border-radius: 6px;
+    height: 40px;
+    font-size: 14px;
+    font-weight: 600;
+}}
+.stButton > button {{
+    border-radius: 6px;
+    height: 40px;
+    font-size: 14px;
+    font-weight: 600;
+    transition: all 150ms ease;
+}}
+.stButton > button:focus {{
+    outline: 2px solid #2563eb !important;
+    outline-offset: 2px !important;
+}}
+
+/* ── Breadcrumb Navigation ─────────────────────────────────────────── */
+.breadcrumb {{
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 24px;
+    font-size: 13px;
+    color: {T['text_muted']};
+}}
+.breadcrumb a {{ color: #2563eb; text-decoration: none; }}
+.breadcrumb a:hover {{ text-decoration: underline; }}
+.breadcrumb-sep {{ color: {T['hdr_color']}; }}
+
+/* ── Page Header Section ───────────────────────────────────────────── */
+.page-header {{
+    margin-bottom: 32px;
+}}
+.page-title {{
+    font-size: 32px;
+    font-weight: 600;
+    color: {T['main_text']};
+    margin: 0 0 8px 0;
+    line-height: 1.2;
+}}
+.page-subtitle {{
+    font-size: 14px;
+    color: {T['text_muted']};
+    margin: 0 0 16px 0;
+}}
+.page-meta {{
+    font-size: 13px;
+    color: {T['hdr_color']};
+}}
 
 /* ── Scanner page headers ──────────────────────────────────────────── */
-.scanner-header  { display:flex; align-items:center; gap:12px; margin-bottom:4px; }
-.scanner-title   { font-size:1.6rem; font-weight:700; }
-.scanner-desc    { color:#999; font-size:0.9rem; margin-bottom:1rem; }
+.scanner-header  {{ display:flex; align-items:center; gap:12px; margin-bottom:4px; }}
+.scanner-title   {{ font-size:2rem; font-weight:700; margin-bottom: 8px; }}
+.scanner-desc    {{ color:{T['scanner_desc']}; font-size:0.9rem; margin-bottom:1.5rem; }}
 
 /* ── Expander polish ───────────────────────────────────────────────── */
-[data-testid="stExpander"] {
-    border: 1px solid rgba(255,255,255,0.07) !important;
+[data-testid="stExpander"] {{
+    border: 1px solid {T['expander_border']} !important;
     border-radius: 10px !important;
-}
+}}
 
 /* ── Tab strip ─────────────────────────────────────────────────────── */
-[data-testid="stTabs"] [data-testid="stTab"] { font-size: 13px; }
+[data-testid="stTabs"] [data-testid="stTab"] {{ font-size: 13px; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -279,6 +376,82 @@ def market_badge_html() -> str:
     if is_market_open():
         return "<span style='background:#1a9641;color:#fff;padding:3px 10px;border-radius:12px;font-size:12px'>● OPEN</span>"
     return "<span style='background:#555;color:#ccc;padding:3px 10px;border-radius:12px;font-size:12px'>● CLOSED</span>"
+
+
+_REGIME_COLORS = {
+    "RISK-ON":  "#22c55e",
+    "NEUTRAL":  "#94a3b8",
+    "RISK-OFF": "#f59e0b",
+    "HIGH-VOL": "#ef4444",
+}
+
+
+def regime_strip_html() -> str:
+    """
+    Compact one-line market regime summary shown in the sidebar on every
+    page — single source of truth via market_context.get_regime_summary(),
+    itself internally cached (5-15 min TTL) so this stays cheap on reruns.
+    """
+    try:
+        from market_context import get_regime_summary
+        r = get_regime_summary()
+    except Exception:
+        return ""
+
+    color = _REGIME_COLORS.get(r["label"], "#94a3b8")
+    vix, spy, yc = r["vix"], r["spy"], r["yield_curve"]
+
+    parts = [f"<span style='color:{color};font-weight:700'>{r['label']}</span>"]
+    if vix.get("level") is not None:
+        parts.append(f"VIX {vix['level']:.1f} ({vix['rank_1y']:.0f}%ile)")
+    if spy.get("trend"):
+        parts.append(f"SPY {spy['trend']}")
+    if yc.get("spread") is not None:
+        curve_lbl = "inverted" if yc["inverted"] else f"{yc['spread']:+.1f}"
+        parts.append(f"10Y-3M {curve_lbl}")
+    ev = r.get("next_event")
+    if ev:
+        parts.append(f"Next: {ev['category']} {ev['date'].strftime('%b %d')}")
+
+    return (
+        "<div style='font-size:11px;color:#94a3b8;line-height:1.6;"
+        "padding:6px 8px;background:rgba(255,255,255,0.03);border-radius:6px;"
+        "margin-bottom:10px'>" + " &nbsp;·&nbsp; ".join(parts) + "</div>"
+    )
+
+
+def regime_context_banner(is_bullish: pd.Series, key: str) -> None:
+    """
+    Opt-in, informational-only regime context for interactive scanner pages.
+    Tags results against the current SPY trend rather than filtering them —
+    hiding research results from a human would be a different, unwanted kind
+    of surprise; that's reserved for the trading daemons (market_context.py
+    consumers in options_paper_trader.py / stock_paper_trader.py / etc.).
+    """
+    show = st.checkbox("🌍 Show regime context", value=False, key=key,
+                       help="Compare this scan's bullish/bearish mix against the current SPY trend & VIX regime.")
+    if not show or is_bullish.empty:
+        return
+    try:
+        from market_context import get_regime_summary
+        r = get_regime_summary()
+    except Exception:
+        return
+
+    n_bull = int(is_bullish.sum())
+    n_bear = int((~is_bullish).sum())
+    spy_trend = r["spy"]["trend"]
+    label = r["label"]
+
+    if spy_trend == "DOWNTREND" and n_bull > n_bear:
+        st.warning(f"⚠️ SPY is in a **DOWNTREND** ({label}) but {n_bull}/{n_bull+n_bear} signals here are "
+                  f"bullish — consider tighter risk sizing on new longs.", icon="⚠️")
+    elif spy_trend == "UPTREND" and n_bear > n_bull:
+        st.info(f"ℹ️ SPY is in an **UPTREND** ({label}) but {n_bear}/{n_bull+n_bear} signals here are "
+               f"bearish — these are counter-trend against the broad market.", icon="ℹ️")
+    else:
+        st.success(f"✅ SPY {spy_trend} · regime {label} — mix of {n_bull} bullish / {n_bear} bearish "
+                  f"signals is consistent with the current trend.", icon="✅")
 
 
 @st.cache_data(ttl=900)
@@ -500,7 +673,7 @@ def _candlestick_vol(df: pd.DataFrame, ticker: str) -> tuple:
 def _apply_chart_style(fig: go.Figure, title: str, rows: int = 2,
                        ytitles: list = None, height: int = 650):
     fig.update_layout(
-        height=height, template="plotly_dark",
+        height=height, template=PLOTLY_TEMPLATE,
         margin=dict(l=40, r=20, t=45, b=20),
         xaxis_rangeslider_visible=False,
         legend=dict(orientation="h", y=1.02, x=0),
@@ -881,6 +1054,44 @@ def _livermore_chart(ticker: str, row: pd.Series, days: int) -> go.Figure:
     return fig
 
 
+def _livermore_historical_edge(ticker: str, current_signal: str) -> None:
+    """
+    "How has this exact signal performed on this ticker before?" — button-
+    gated (never auto-runs on page load, matching the fix applied earlier
+    this session to Weekly Puts). Reuses classify_pivotal_points(), which
+    already computes a full historical signal column — no new backtest
+    engine, just aggregation via signal_history.compute_signal_forward_returns.
+    """
+    if current_signal not in ("UPWARD_PIVOT", "DOWNWARD_PIVOT"):
+        return
+    with st.expander(f"📈 Historical Edge — how has this signal performed on {ticker} before?", expanded=False):
+        if st.button("▶  Compute historical edge (2yr lookback)", key=f"lv_edge_{ticker}"):
+            with st.spinner(f"Replaying past {current_signal} signals on {ticker}…"):
+                from signal_history import compute_signal_forward_returns
+                hist = fetch_ohlcv(ticker, days=730)
+                if hist.empty or len(hist) < 60:
+                    st.warning("Not enough history to compute.", icon="⚠️")
+                    return
+                hist = classify_pivotal_points(hist, swing_window=5, min_reaction_pct=1.5)
+                mask = hist["signal"] == current_signal
+                direction = "bullish" if current_signal == "UPWARD_PIVOT" else "bearish"
+                edge = compute_signal_forward_returns(hist, mask, forward_days=(5, 10, 20), direction=direction)
+
+            cols = st.columns(3)
+            for col, n in zip(cols, (5, 10, 20)):
+                stats = edge[n]
+                if stats["n"] == 0:
+                    col.metric(f"{n}d forward", "—", help="No past occurrences in the lookback window")
+                else:
+                    col.metric(f"{n}d forward", f"{stats['win_rate']:.0f}% win",
+                              f"{stats['avg_return_pct']:+.1f}% avg")
+            n_total = edge[5]["n"]
+            if n_total and n_total < 5:
+                st.caption(f"⚠️ Only {n_total} past occurrences — small sample, treat as directional not definitive.")
+            elif n_total:
+                st.caption(f"Based on {n_total} past {current_signal} signals on {ticker} over the last 2 years.")
+
+
 def render_livermore():
     clicked = _page_header(
         "🔴", "Livermore Pivotal Points",
@@ -951,6 +1162,8 @@ def render_livermore():
     c3.metric("Bearish ▼",     len(down))
     c4.metric("Vol Confirmed",  f"{vol_pct}%")
 
+    regime_context_banner(df["Signal"] == "UPWARD_PIVOT", key="lv_regime_ctx")
+
     st.divider()
 
     _LV_COL_CFG = {
@@ -985,8 +1198,61 @@ def render_livermore():
             st.success(f"▲ UPWARD PIVOT  •  {row.get('Signal Date','')}  •  Pivot {row.get('Pivot Level','')}")
         elif sig == "DOWNWARD_PIVOT":
             st.error(f"▼ DOWNWARD PIVOT  •  {row.get('Signal Date','')}  •  Pivot {row.get('Pivot Level','')}")
+
+        if sig in ("UPWARD_PIVOT", "DOWNWARD_PIVOT"):
+            close       = float(row.get("Close", 0) or 0)
+            pivot_level = float(row.get("Pivot Level", 0) or 0)
+            trend       = row.get("Trend (EMA)", "—")
+            continuation = row.get("Continuation", "NO")
+            bars_ago    = row.get("Bars Ago", "—")
+            high_52w    = row.get("52W High")
+            is_long     = sig == "UPWARD_PIVOT"
+
+            if close and pivot_level:
+                stop   = round(pivot_level * (0.98 if is_long else 1.02), 2)
+                risk   = round(abs(close - stop), 2)
+                target = round(close + 2 * risk, 2) if is_long else round(close - 2 * risk, 2)
+                trend_ok = (is_long and trend == "UPTREND") or (not is_long and trend == "DOWNTREND")
+
+                st.markdown("###### 📋 Trade Plan")
+                tc1, tc2, tc3, tc4 = st.columns(4)
+                tc1.metric("Entry",  f"${close:.2f}")
+                tc2.metric("Stop",   f"${stop:.2f}", f"-${risk:.2f}" if is_long else f"+${risk:.2f}")
+                tc3.metric("Target (2R)", f"${target:.2f}")
+                tc4.metric("Risk/share", f"${risk:.2f}")
+
+                direction = "above" if is_long else "below"
+                invalid   = "closes back below" if is_long else "closes back above"
+                st.markdown(
+                    f"**Entry:** buy near **${close:.2f}**, ideally on a pullback to within 1–3% of the "
+                    f"pivot level (**${pivot_level:.2f}**) rather than chasing the current price.  \n"
+                    f"**Stop-loss:** **${stop:.2f}** — a daily close {invalid} this level invalidates the "
+                    f"pivot; exit immediately, don't wait for it to recover.  \n"
+                    f"**Target:** **${target:.2f}** (2:1 reward/risk). "
+                    + (f"Next reference level is the 52-week high at **${high_52w:.2f}**.  \n"
+                       if is_long and pd.notna(high_52w) and high_52w > close else "  \n")
+                    + f"**Time frame to hold:** this is a swing setup, not a day trade — plan on "
+                      f"**1–4 weeks**, holding as long as price stays {direction} the stop and the trend "
+                      f"stays aligned. There's no fixed time exit; the stop and trend are what get you out.  \n"
+                    f"**Exit criteria (any one triggers an exit):**\n"
+                    f"- Daily close {invalid} **${stop:.2f}** (stop hit)\n"
+                    f"- Trend flips against you — currently **{trend}**"
+                    + (" (already misaligned — reduce size or skip)" if not trend_ok else "")
+                    + "\n"
+                    f"- Price reaches **${target:.2f}** — take partial profit and trail the stop on the rest\n"
+                    f"- No continuation within ~10 trading days of the signal (**{bars_ago} bars ago**, "
+                    f"continuation so far: **{continuation}**) — reassess, don't hold hoping"
+                )
+                if not trend_ok:
+                    st.warning(
+                        "Trend filter is misaligned for this signal — the EMA trend disagrees with the "
+                        "pivot direction. Consider skipping or sizing down.", icon="⚠️"
+                    )
+
         with st.spinner(f"Loading {chosen}…"):
             st.plotly_chart(_livermore_chart(chosen, row, days), use_container_width=True)
+
+        _livermore_historical_edge(chosen, sig)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -994,6 +1260,7 @@ def render_livermore():
 # ═════════════════════════════════════════════════════════════════════════════
 
 def render_ema():
+    from ema_crossover_screener import run_ema_screener, detect_crossovers, PRESETS as EMA_PRESETS
     clicked = _page_header(
         "📉", "EMA Crossover",
         "Fast/Slow/Trend EMA crossover with ADX, volume, and RSI confirmation.",
@@ -1173,6 +1440,7 @@ def render_ema():
 # ═════════════════════════════════════════════════════════════════════════════
 
 def render_breakout():
+    from breakout_screener import run_breakout_screener, run_all_strategies, add_base_indicators, STRATEGY_GROUPS, STRATEGY_LABELS
     clicked = _page_header(
         "💥", "Breakout Scanner",
         "6 research-backed strategies: 52W High, Volume Surge, NR7, BB Squeeze, Inside Bar, MA Reclaim.",
@@ -1237,6 +1505,8 @@ def render_breakout():
     c3.metric("Bearish ▼", len(bear_bo))
     c4.metric("Top Strategy", STRATEGY_LABELS.get(top_sig[0][0], ("?",))[0] if top_sig else "—")
 
+    regime_context_banner(df_bo["Direction"] == "BULLISH", key="bo_regime_ctx")
+
     # Strategy breakdown bar chart
     if "Signals" in df_bo.columns:
         sig_counts = Counter(s.strip() for r in df_bo["Signals"] for s in r.split(","))
@@ -1250,7 +1520,7 @@ def render_breakout():
             marker_color=["#26a69a" if t=="bullish" else "#ef5350" for t in sig_df["Type"]],
             text=sig_df["Count"], textposition="outside",
         ))
-        bar_fig.update_layout(template="plotly_dark", height=max(180, len(sig_df)*38),
+        bar_fig.update_layout(template=PLOTLY_TEMPLATE, height=max(180, len(sig_df)*38),
                               margin=dict(l=10, r=40, t=20, b=20), xaxis_title="Count")
         st.plotly_chart(bar_fig, use_container_width=True)
 
@@ -1362,6 +1632,7 @@ def render_breakout():
 # ═════════════════════════════════════════════════════════════════════════════
 
 def render_minervini():
+    from minervini_screener import run_minervini_screener, check_trend_template, _sma as _msma
     clicked = _page_header(
         "🏆", "Minervini SEPA",
         "Specific Entry Point Analysis — Stage 2 trend template, VCP, and Relative Strength.",
@@ -1437,6 +1708,11 @@ def render_minervini():
     c3.metric("VCP Detected",   int(vcp_ct))
     c4.metric("Near Pivot",     int(near))
     c5.metric("Broken Out 🚀",  int(broken))
+
+    # Minervini setups are inherently long-only (Stage 2 = bullish by
+    # definition) — pass all-True so the banner flags whether the broad
+    # market actually supports that many bullish setups right now.
+    regime_context_banner(pd.Series([True] * len(df_ms)), key="ms_regime_ctx")
 
     st.divider()
 
@@ -1780,7 +2056,7 @@ def render_history():
                 sub = freq_df[freq_df["Scanner"]==sc]
                 freq_fig.add_trace(go.Scatter(x=sub["Time"], y=sub["Count"], mode="lines+markers",
                                              name=sc, line=dict(color=colors.get(sc,"#888"), width=2)))
-            freq_fig.update_layout(template="plotly_dark", height=300,
+            freq_fig.update_layout(template=PLOTLY_TEMPLATE, height=300,
                                    margin=dict(l=40,r=20,t=20,b=20),
                                    legend=dict(orientation="h"), yaxis_title="Signals found")
             st.plotly_chart(freq_fig, use_container_width=True)
@@ -1791,6 +2067,17 @@ def render_history():
 # ═════════════════════════════════════════════════════════════════════════════
 
 def render_astro():
+    from astro_scanner import (
+        run_astro_scanner, compute_market_bias, get_current_moon,
+        get_retrograde_status, get_planetary_aspects,
+        get_upcoming_events as get_astro_events,
+        get_moon_event_dates, analyze_moon_returns, find_gann_cycle_dates,
+        get_karana, is_vishti, backtest_vishti,
+        get_rahu_ketu, get_moon_nakshatra, get_vedic_planets,
+        compute_vedic_daily_score, build_prediction_calendar,
+        get_decade_cheatsheet, get_annual_roadmap,
+        generate_annual_forecast, generate_multi_year_outlook,
+    )
     st.markdown(
         "<div class='scanner-header'>"
         "<span style='font-size:2rem'>🔭</span>"
@@ -2223,7 +2510,7 @@ def render_astro():
                 marker=dict(color=color, size=12, symbol="diamond"),
             ))
         fig_cal.update_layout(
-            template="plotly_dark", height=320,
+            template=PLOTLY_TEMPLATE, height=320,
             margin=dict(l=40, r=20, t=20, b=40),
             yaxis=dict(tickvals=[-1, 0, 1],
                        ticktext=["BEARISH", "NEUTRAL", "BULLISH"],
@@ -2382,7 +2669,7 @@ def render_astro():
                         textangle=-60,
                     )
                 fig_gann.update_layout(
-                    template="plotly_dark", height=380,
+                    template=PLOTLY_TEMPLATE, height=380,
                     title=f"{gann_ticker} — Gann Cycle Projections",
                     margin=dict(l=40, r=20, t=40, b=30),
                     legend=dict(orientation="h"),
@@ -2510,7 +2797,7 @@ def render_astro():
                             bin_size=0.25, show_rug=False,
                         )
                         fig_dist.update_layout(
-                            template="plotly_dark", height=320,
+                            template=PLOTLY_TEMPLATE, height=320,
                             margin=dict(l=30, r=10, t=20, b=30),
                             legend=dict(orientation="h"),
                             xaxis_title="Daily Return %",
@@ -2521,7 +2808,7 @@ def render_astro():
                         fig_box = go.Figure()
                         fig_box.add_trace(go.Box(y=bh_rets, name="Bhadra", marker_color="#ef5350"))
                         fig_box.add_trace(go.Box(y=nb_rets, name="Normal", marker_color="#26a69a"))
-                        fig_box.update_layout(template="plotly_dark", height=320,
+                        fig_box.update_layout(template=PLOTLY_TEMPLATE, height=320,
                                               margin=dict(l=30,r=10,t=20,b=30))
                         st.plotly_chart(fig_box, use_container_width=True)
 
@@ -2545,7 +2832,7 @@ def render_astro():
                         marker=dict(color="#ef5350", size=4, symbol="circle"),
                     ))
                     fig_cum.update_layout(
-                        template="plotly_dark", height=320,
+                        template=PLOTLY_TEMPLATE, height=320,
                         margin=dict(l=30, r=10, t=20, b=30),
                         legend=dict(orientation="h"),
                         yaxis_title="Cumulative Return (×)",
@@ -2568,7 +2855,7 @@ def render_astro():
                             name="Bhadra Days", marker_color="#ef5350", opacity=0.85,
                         ))
                     fig_m.update_layout(
-                        template="plotly_dark", height=320,
+                        template=PLOTLY_TEMPLATE, height=320,
                         barmode="group",
                         margin=dict(l=30, r=10, t=20, b=60),
                         xaxis_tickangle=-45,
@@ -2724,7 +3011,7 @@ def render_astro():
             textfont=dict(size=9),
         ))
         fig_pred.update_layout(
-            template="plotly_dark", height=320,
+            template=PLOTLY_TEMPLATE, height=320,
             margin=dict(l=30, r=10, t=20, b=60),
             xaxis_tickangle=-45,
             yaxis=dict(title="Combined Score", range=[-10, 10]),
@@ -2751,6 +3038,7 @@ _SIGNAL_BADGE = {
 
 
 def render_combined():
+    from combined_screener import run_combined_screener
     # ── Header ────────────────────────────────────────────────────────────────
     c1, c2, c3 = st.columns([6, 2, 2])
     with c1:
@@ -2882,6 +3170,11 @@ def render_combined():
     c3.metric("✅ Buy",           len(buys))
     c4.metric("👀 Watch",         len(watch))
     c5.metric("Avg Score",       f"{avg_score:.1f} / 11")
+
+    # Combined scorer is long-only (STRONG BUY/BUY/WATCH, no SELL tier) —
+    # all-True flags whether the broad market actually supports this many
+    # bullish setups right now.
+    regime_context_banner(pd.Series([True] * len(df_cb)), key="cb_regime_ctx")
 
     st.divider()
 
@@ -3066,6 +3359,7 @@ def render_combined():
 # ═════════════════════════════════════════════════════════════════════════════
 
 def render_rsi():
+    from rsi_screener import run_rsi_screener, detect_rsi_signals
     clicked = _page_header(
         "📊", "RSI Scanner",
         "Oversold/overbought crosses, RSI 50-line momentum shifts, and bullish/bearish divergence.",
@@ -3197,7 +3491,7 @@ def render_rsi():
                                      line=dict(color="#42a5f5", width=1.2), name="EMA50"),
                           row=1, col=1)
             # Mark signal
-            if sig_row:
+            if len(sig_row):
                 sig_date = sig_row.get("Signal Date")
                 sig_close = sig_row.get("Close")
                 for val, color, lbl in [
@@ -3227,6 +3521,7 @@ def render_rsi():
 # ═════════════════════════════════════════════════════════════════════════════
 
 def render_macd():
+    from macd_screener import run_macd_screener, detect_macd_signals
     clicked = _page_header(
         "〽️", "MACD Scanner",
         "Signal line crosses, histogram flips, and zero-line crossovers with volume confirmation.",
@@ -3358,7 +3653,7 @@ or above 0 (for bear), ensuring you're trading the higher-conviction side of the
             fig.add_trace(go.Scatter(x=ann.index, y=ann["ema50"], mode="lines",
                                      line=dict(color="#42a5f5", width=1.2), name="EMA50"),
                           row=1, col=1)
-            if sig_row:
+            if len(sig_row):
                 for val, color, lbl in [
                     (sig_row.get("Stop"),   "#ef5350", f"Stop {sig_row.get('Stop','')}"),
                     (sig_row.get("Target"), "#26a69a", f"Target {sig_row.get('Target','')}"),
@@ -3390,6 +3685,7 @@ or above 0 (for bear), ensuring you're trading the higher-conviction side of the
 # ═════════════════════════════════════════════════════════════════════════════
 
 def render_gap():
+    from gap_screener import run_gap_screener, detect_gaps, run_live_gap_screener
     _ABOUT_GAP = """
 **Gap Types**
 
@@ -3543,24 +3839,26 @@ def render_gap():
         type_sel   = st.radio("Filter by type", type_opts, horizontal=True, key="gap_type_filter")
         display_df = df_gap if type_sel == "ALL" else df_gap[df_gap["Gap Type"] == type_sel]
 
-        COLS_GAP = ["Ticker", "Signal", "Gap Type", "Signal Date", "Bars Ago",
+        COLS_GAP = ["Ticker", "Signal", "Gap Type", "Trade Bias", "Signal Date", "Bars Ago",
                     "Gap %", "Prev Close", "Open", "Close",
                     "Vol vs Avg", "Body Quality %", "Gap Fill %",
-                    "Stop", "Target", "R/R", "RSI", "EMA50"]
+                    "Entry", "Stop", "Target", "R/R", "RSI", "EMA50"]
         cols = [c for c in COLS_GAP if c in display_df.columns]
         fmt = {}
-        for col in ["Prev Close", "Open", "Close", "Stop", "Target"]:
+        for col in ["Prev Close", "Open", "Close", "Entry", "Stop", "Target"]:
             if col in display_df.columns: fmt[col] = "{:.2f}"
         if "Gap %"          in display_df.columns: fmt["Gap %"]          = "{:+.2f}%"
         if "Vol vs Avg"     in display_df.columns: fmt["Vol vs Avg"]     = "{:.2f}x"
         if "Body Quality %" in display_df.columns: fmt["Body Quality %"] = "{:.1f}%"
         if "Gap Fill %"     in display_df.columns: fmt["Gap Fill %"]     = "{:.1f}%"
+        if "R/R"            in display_df.columns: fmt["R/R"]            = "{:.2f}"
 
         def _gap_color(row):
-            sig   = row.get("Signal", "")
+            bias  = row.get("Trade Bias", row.get("Signal", ""))
             gtype = row.get("Gap Type", "")
-            if   gtype == "BREAKAWAY":    bg = "#1b2a3a" if sig == "GAP_UP" else "#3a1b2a"
-            elif gtype == "CONTINUATION": bg = "#1b3a2a" if sig == "GAP_UP" else "#3a1b1b"
+            is_long = bias == "LONG" or bias == "GAP_UP"
+            if   gtype == "BREAKAWAY":    bg = "#1b2a3a" if is_long else "#3a1b2a"
+            elif gtype == "CONTINUATION": bg = "#1b3a2a" if is_long else "#3a1b1b"
             elif gtype == "EXHAUSTION":   bg = "#3a3a1b"
             else:                         bg = "#2a2a2a"
             return [f"background-color:{bg};color:#e0e0e0"] * len(row)
@@ -3569,6 +3867,34 @@ def render_gap():
             display_df[cols].style.apply(_gap_color, axis=1).format(fmt, na_rep="—"),
             use_container_width=True, hide_index=True,
         )
+
+        st.divider()
+        st.markdown("##### 📋 Trade Plan Suggestions")
+        st.caption(
+            "Top setups ranked by R/R. BREAKAWAY/CONTINUATION trade **with** the gap; "
+            "EXHAUSTION rows are faded (traded **against** the gap) — sizing at 1R = risk to Stop."
+        )
+        plan_df = display_df.dropna(subset=["R/R"]) if "R/R" in display_df.columns else display_df
+        plan_df = plan_df.sort_values("R/R", ascending=False).head(8)
+        if plan_df.empty:
+            st.info("No setups with a valid R/R in the current filter.")
+        else:
+            for _, r in plan_df.iterrows():
+                bias  = r.get("Trade Bias", "LONG" if r.get("Signal") == "GAP_UP" else "SHORT")
+                arrow = "🟢 LONG" if bias == "LONG" else "🔴 SHORT"
+                risk_pct   = abs(r["Entry"] - r["Stop"]) / r["Entry"] * 100 if r.get("Entry") else 0
+                reward_pct = abs(r["Target"] - r["Entry"]) / r["Entry"] * 100 if r.get("Entry") else 0
+                fade_note = " — **fade trade** (against the gap)" if r.get("Gap Type") == "EXHAUSTION" else ""
+                st.markdown(
+                    f"**{r['Ticker']}** — {arrow} · {r.get('Gap Type','')}{fade_note}  \n"
+                    f"Entry `${r['Entry']:.2f}` → Stop `${r['Stop']:.2f}` (-{risk_pct:.1f}%) "
+                    f"→ Target `${r['Target']:.2f}` (+{reward_pct:.1f}%) · **R/R {r['R/R']:.2f}** "
+                    f"· Vol {r.get('Vol vs Avg', 0):.2f}x · {r.get('Signal Date','')}"
+                )
+            st.caption(
+                "Not investment advice. Position size so that Stop-Entry distance = your fixed "
+                "risk-per-trade (e.g. 1% of account); avoid trading on margin."
+            )
 
         st.divider()
         st.markdown("##### Chart")
@@ -3633,6 +3959,8 @@ def render_gap():
 # ═════════════════════════════════════════════════════════════════════════════
 
 def render_swing_options():
+    # Use enhanced screener with real Polygon.io data + local caching
+    from swing_options_screener_enhanced import run_swing_options_screener
     clicked = _page_header(
         "🎰", "Swing Options 45-60 DTE",
         "Directional options scanner: 45-60 DTE with Greeks filters (Δ, Θ, Γ, Θ/Vega). "
@@ -3640,6 +3968,9 @@ def render_swing_options():
         "Supertrend, BB expansion, Stoch) then validates option entry with Black-Scholes Greeks.",
         scan_key="opts_scan_btn", last_key="opts_time",
     )
+
+    # Display backtest validation badge
+    st.caption(backtest_badges.swing_options_badge())
 
     _ABOUT_OPTS = """
 **Strategy Overview**
@@ -3680,10 +4011,12 @@ Finds directional swing setups (calls & puts) where:
 
     with st.expander("⚙️ Settings", expanded=False):
         c1, c2, c3 = st.columns(3)
-        opts_min_score = c1.slider("Min Score", 4.0, 9.5, 6.0, step=0.5, key="opts_min_score",
-                                    help="Composite signal score threshold (0-10). Higher = more selective.")
-        opts_dte       = c2.slider("Target DTE", 40, 65, 50, step=5, key="opts_dte",
-                                    help="Days to expiration to price the option (typically 45-60)")
+        opts_min_score = c1.slider("Min Score", 4.0, 9.5, 7.5, step=0.5, key="opts_min_score",
+                                    help="Composite signal score threshold (0-10). Higher = more selective. "
+                                         "7.5 is the validated default (strategies/swing_options_45_60d/config.yaml).")
+        opts_dte       = c2.slider("Target DTE", 40, 65, 52, step=1, key="opts_dte",
+                                    help="Days to expiration to price the option (typically 45-60). "
+                                         "52 is the validated default.")
         opts_iv_prem   = c3.slider("IV Premium", 1.0, 1.5, 1.1, step=0.05, key="opts_iv_prem",
                                     help="IV = Hist Vol × this factor (options trade at a premium to HV)")
         c4, c5, c6 = st.columns(3)
@@ -3756,14 +4089,17 @@ Finds directional swing setups (calls & puts) where:
 
     # Table — drop internal column
     display_cols = [c for c in [
-        "Symbol", "Direction", "Score", "Close", "Strike", "Premium",
+        "Symbol", "Direction", "Score", "Close",
+        "Expiry", "DTE", "Strike", "Bid", "Ask", "Premium", "IV",
+        "Volume", "OI", "Contract",
         "Delta", "Theta/day", "Gamma", "Vega/1%", "θ/Prem %", "θ/Vega",
         "Greeks OK", "Hist Vol", "ADX", "RSI",
         "EMA Aligned", "Trend 200", "MACD OK", "Vol Surge", "Supertrend",
     ] if c in df_opts.columns]
 
     fmt = {
-        "Score": "{:.1f}", "Close": "{:.2f}", "Premium": "{:.2f}",
+        "Score": "{:.1f}", "Close": "{:.2f}",
+        "Bid": "{:.2f}", "Ask": "{:.2f}", "Premium": "{:.2f}", "IV": "{:.1f}%",
         "Delta": "{:.3f}", "Theta/day": "{:.4f}", "Gamma": "{:.4f}",
         "Vega/1%": "{:.3f}", "θ/Prem %": "{:.2f}%", "θ/Vega": "{:.3f}",
         "Hist Vol": "{:.1%}", "ADX": "{:.1f}", "RSI": "{:.1f}",
@@ -3935,6 +4271,7 @@ def _ibd_style_table(df: pd.DataFrame, list_names: list, key: str):
 
 
 def render_ibd():
+    from ibd_scanner import run_ibd_scanner
     clicked = _page_header(
         "📋", "IBD Near Buy Zone",
         "Identifies stocks near IBD-style buy setups: In Base, Pullback, "
@@ -4377,7 +4714,7 @@ def _signal_badges(signals, max_show=6):
     )
 
 
-def _exit_badges(exit_signals, urgency):
+def _exit_badges(exit_signals, urgency, action=""):
     if not isinstance(exit_signals, list) or not exit_signals:
         return ""
     color = {"URGENT": "#ef5350", "CONSIDER": "#f0c040", "WATCH": "#ffb74d"}.get(urgency, "#888")
@@ -4386,13 +4723,17 @@ def _exit_badges(exit_signals, urgency):
         f"border-radius:4px;font-size:10px;color:{color}'>{s}</span>"
         for s in exit_signals[:4]
     )
+    action_html = (
+        f"<div style='font-size:11px;color:#eee;margin-top:5px;font-weight:600'>{action}</div>"
+        if action else ""
+    )
     return (
         f"<div style='margin-top:7px;padding:6px 8px;"
         f"background:rgba(239,83,80,0.08);border-left:2px solid {color};"
         f"border-radius:4px'>"
         f"<div style='font-size:10px;font-weight:700;color:{color};"
         f"margin-bottom:3px'>⚠️ EXIT SIGNALS ({urgency})</div>"
-        f"<div style='line-height:1.8'>{badges}</div></div>"
+        f"<div style='line-height:1.8'>{badges}</div>{action_html}</div>"
     )
 
 
@@ -4413,7 +4754,7 @@ def _alert_card(row: pd.Series, col):
     exit_sigs    = row.get("Exit Signals", [])
     exit_urgency = row.get("Exit Urgency", "")
     exit_action  = row.get("Exit Action", "")
-    exit_block   = _exit_badges(exit_sigs, exit_urgency) if exit_sigs else ""
+    exit_block   = _exit_badges(exit_sigs, exit_urgency, exit_action) if exit_sigs else ""
 
     col.markdown(f"""
 <div style="background:{bg};border:1px solid {accent};border-radius:10px;
@@ -4422,7 +4763,7 @@ def _alert_card(row: pd.Series, col):
     <span style="font-size:20px;font-weight:800;color:#eee">{row['Symbol']} <span style='font-size:14px;color:{accent}'>{arrow}</span></span>
     <span style="color:{accent};font-weight:700;font-size:12px">{label}</span>
   </div>
-  <div style="color:#888;font-size:11px;margin-bottom:8px">{row['Name']} &nbsp;·&nbsp; Score {row['Score']}/12 &nbsp;·&nbsp; RS {row['RS']}</div>
+  <div style="color:#888;font-size:11px;margin-bottom:8px">{row['Name']} &nbsp;·&nbsp; Score {row['Score']}/12 &nbsp;·&nbsp; RS {row['RS']}{f" &nbsp;·&nbsp; Conviction {row['Conviction Score']:.0f}/100" if 'Conviction Score' in row else ''}</div>
 
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:12px;margin-bottom:8px">
     <div><span style='color:#888'>Entry</span>  <b style='color:#eee'>${row['Entry']:.2f}</b></div>
@@ -4439,7 +4780,7 @@ def _alert_card(row: pd.Series, col):
 </div>""", unsafe_allow_html=True)
 
 
-def _trade_plan_expander(row: pd.Series, col):
+def _trade_plan_expander(row: pd.Series, col, key_suffix: str = ""):
     """Expandable trade plan window below an alert card."""
     d     = row["Direction"]
     entry = row["Entry"]
@@ -4525,6 +4866,25 @@ def _trade_plan_expander(row: pd.Series, col):
                 "- Hit **T3** → trail remaining position with 10-day low or EMA9 break\n"
                 "- Stock drops back inside base before T1 → exit if conviction weakens\n"
             )
+            st.divider()
+
+            # Historical edge — button-gated (never auto-runs on load), reuses
+            # the existing backtest engine unchanged rather than a new one.
+            st.markdown("**Historical Edge**")
+            if st.button("▶  Backtest this alert on 2yr history", key=f"alert_edge_{key_suffix}{row['Symbol']}"):
+                with st.spinner(f"Walk-forward backtesting {row['Symbol']}…"):
+                    from backtest_strategy import run_strategy_backtest
+                    result = run_strategy_backtest(tickers=[row["Symbol"]])
+                per = result.get("per_ticker", {}).get(row["Symbol"])
+                if not per or per.get("trades", 0) == 0:
+                    st.caption("No past Daily Alerts signals fired on this ticker in the last 2 years.")
+                else:
+                    e1, e2, e3 = st.columns(3)
+                    e1.metric("Past Signals", per["trades"])
+                    e2.metric("Win Rate", f"{per['win_rate']:.0f}%")
+                    e3.metric("Total Return", f"{per['total_return']:+.1f}%")
+                    if per["trades"] < 5:
+                        st.caption("⚠️ Small sample — treat as directional, not definitive.")
 
 
 def _exit_card(row: pd.Series, col):
@@ -4571,7 +4931,7 @@ def _exit_card(row: pd.Series, col):
 def _alerts_full_table(df: pd.DataFrame):
     """Render the full alerts table with column config."""
     show = [
-        "Symbol", "Name", "Direction", "Conviction", "Score",
+        "Symbol", "Name", "Direction", "Conviction", "Conviction Score", "Score",
         "Entry", "Stop", "Stop %", "T1", "T2", "T2 %", "T3", "R/R",
         "RSI", "ADX", "RS", "Vol Ratio", "52wH %", "Minervini",
         "ATR %", "Sector",
@@ -4593,6 +4953,7 @@ def _alerts_full_table(df: pd.DataFrame):
         "Name":      st.column_config.TextColumn("Name"),
         "Direction": st.column_config.TextColumn("Dir",     width="small"),
         "Conviction":st.column_config.TextColumn("Conv",    width="small"),
+        "Conviction Score": st.column_config.NumberColumn("Conv Score", format="%.1f /100"),
         "Score":     st.column_config.NumberColumn("Score", format="%d /12"),
         "Entry":     st.column_config.NumberColumn("Entry", format="$%.2f"),
         "Stop":      st.column_config.NumberColumn("Stop",  format="$%.2f"),
@@ -4622,6 +4983,7 @@ def _alerts_full_table(df: pd.DataFrame):
 
 
 def render_alerts():
+    from economic_calendar import get_event_context
     # ── Header ────────────────────────────────────────────────────────────────
     h1, h2, h3 = st.columns([5, 2, 2])
     with h1:
@@ -4747,6 +5109,24 @@ def render_alerts():
 
     st.divider()
 
+    # ── Top 3 by Conviction Score ──────────────────────────────────────────────
+    # Weighted composite (Score + R/R + RS + ADX + Vol Ratio + Minervini) —
+    # a finer-grained ranking than the STRONG/HIGH/WATCH buckets below, and
+    # the same ranking alerts_live_runner.py uses to pick which alerts to
+    # actually trade (see TOP_CONVICTION_N).
+    if "Conviction Score" in df.columns and not df.empty:
+        top3 = df.sort_values("Conviction Score", ascending=False).head(3)
+        st.markdown(
+            "<h3 style='color:#c9a84c;margin-bottom:4px'>🏆 Top 3 by Conviction</h3>"
+            "<hr style='border-color:#c9a84c;margin-top:0'>",
+            unsafe_allow_html=True,
+        )
+        top3_cols = st.columns(3)
+        for i, (_, row) in enumerate(top3.iterrows()):
+            _alert_card(row, top3_cols[i % 3])
+            _trade_plan_expander(row, top3_cols[i % 3], key_suffix=f"top3_{i}_")
+        st.divider()
+
     # ── Top alert cards (STRONG + HIGH) ───────────────────────────────────────
     top = df[df["Conviction"].isin(["STRONG", "HIGH"])].head(9)
     if not top.empty:
@@ -4758,7 +5138,7 @@ def render_alerts():
         card_cols = st.columns(3)
         for i, (_, row) in enumerate(top.iterrows()):
             _alert_card(row, card_cols[i % 3])
-            _trade_plan_expander(row, card_cols[i % 3])
+            _trade_plan_expander(row, card_cols[i % 3], key_suffix=f"top_{i}_")
 
     # ── Full table ────────────────────────────────────────────────────────────
     st.divider()
@@ -4856,6 +5236,7 @@ def render_alerts():
 # ═════════════════════════════════════════════════════════════════════════════
 
 def render_backtest():
+    from backtest_strategy import run_strategy_backtest
     st.markdown(
         "<div class='scanner-header'>"
         "<span style='font-size:2rem'>📊</span>"
@@ -4893,6 +5274,25 @@ def render_backtest():
                                    key="bt_risk",
                                    help="% of portfolio risked per trade (1% rule)")
 
+        st.markdown("**BUY Pyramid Mode** (scale-in on the way to T1, scale-out at T1/T2/T3)")
+        pc1, pc2, pc3 = st.columns(3)
+        with pc1:
+            bt_pyramid = st.checkbox("Enable pyramid mode", value=False, key="bt_pyramid",
+                                      help="BUY-only. Adds legs at 1/3 & 2/3 of the way to T1 "
+                                           "(same $ capital each), instead of a single fixed-size entry.")
+        with pc2:
+            bt_sell_mode = st.selectbox(
+                "Sell mode", ["scale_50_25_25", "all_at_t1", "runner"],
+                index=0, key="bt_sell_mode", disabled=not bt_pyramid,
+                help="scale_50_25_25: sell 50% at T1 / 25% at T2 / 25% at T3 (best backtested profit factor). "
+                     "all_at_t1: sell entire position at T1. "
+                     "runner: no selling at T1/T2, only arms a dynamic stop; sells all at T3.",
+            )
+        with pc3:
+            bt_dyn_stop_pct = st.slider("Dynamic stop below T1 (%)", 0.5, 5.0, 2.0, step=0.5,
+                                        key="bt_dyn_stop_pct", disabled=not bt_pyramid,
+                                        help="Once T1 is reached, the stop moves to this % below the T1 price.")
+
     run_bt = st.button("▶  Run Backtest", type="primary", key="bt_run_btn")
 
     if "bt_result" not in st.session_state:
@@ -4911,15 +5311,18 @@ def render_backtest():
 
             with st.spinner(f"Running backtest on {len(tickers)} tickers…"):
                 result = run_strategy_backtest(
-                    tickers         = tickers,
-                    start_date      = bt_start.strftime("%Y-%m-%d"),
-                    end_date        = bt_end.strftime("%Y-%m-%d"),
-                    min_score       = bt_min_score,
-                    max_hold        = bt_max_hold,
-                    initial_capital = float(bt_capital),
-                    risk_pct        = bt_risk / 100,
-                    max_workers     = 8,
-                    progress_cb     = _cb,
+                    tickers          = tickers,
+                    start_date       = bt_start.strftime("%Y-%m-%d"),
+                    end_date         = bt_end.strftime("%Y-%m-%d"),
+                    min_score        = bt_min_score,
+                    max_hold         = bt_max_hold,
+                    initial_capital  = float(bt_capital),
+                    risk_pct         = bt_risk / 100,
+                    max_workers      = 8,
+                    progress_cb      = _cb,
+                    buy_pyramid      = bt_pyramid,
+                    dynamic_stop_pct = bt_dyn_stop_pct,
+                    sell_mode        = bt_sell_mode,
                 )
             prog.empty()
             stat.empty()
@@ -5040,6 +5443,7 @@ def render_backtest():
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _alpaca_client_from_state() -> Optional[object]:
+    from alpaca_trader import make_client
     key = st.session_state.get("alpaca_api_key", "").strip()
     sec = st.session_state.get("alpaca_secret_key", "").strip()
     if not key or not sec:
@@ -5051,6 +5455,14 @@ def _alpaca_client_from_state() -> Optional[object]:
 
 
 def render_paper_trade():
+    from alpaca_trader import (
+        make_client, get_account_summary, is_market_open_alpaca,
+        get_positions, get_open_orders,
+        get_todays_trades, get_portfolio_history,
+        close_position, close_all_positions,
+        cancel_order, cancel_all_orders,
+        execute_alerts as alpaca_execute_alerts,
+    )
     st.markdown(
         "<div class='scanner-header'>"
         "<span style='font-size:2rem'>🤖</span>"
@@ -5172,6 +5584,53 @@ def render_paper_trade():
             st.rerun()
     else:
         st.caption("No open positions — runner is flat.")
+
+    st.divider()
+
+    # ── Pyramid positions (Daily Alerts BUY pyramid mode) ─────────────────────
+    import json as _json
+    pyramid_path = os.path.join(os.path.dirname(__file__), "logs", "pyramid_state.json")
+    pyramid_state = {}
+    if os.path.exists(pyramid_path):
+        try:
+            with open(pyramid_path) as f:
+                pyramid_state = _json.load(f)
+        except Exception:
+            pyramid_state = {}
+
+    st.markdown(f"### 🔺 Pyramid Positions ({len(pyramid_state)})")
+    st.caption("Daily Alerts BUY scale-in/scale-out state — legs added at 1/3 & 2/3 to T1, "
+               "sold 50%/25%/25% at T1/T2/T3, dynamic stop after T1.")
+
+    if pyramid_state:
+        live_by_sym = {p["symbol"]: p for p in positions}
+        rows = []
+        for sym, st_ in pyramid_state.items():
+            live = live_by_sym.get(sym, {})
+            pct_sold = 50 * st_.get("sold_t1", False) + 25 * st_.get("sold_t2", False)
+            legs = 1 + int(st_.get("added_leg1", False)) + int(st_.get("added_leg2", False))
+            rows.append({
+                "Symbol":      sym,
+                "Entry $":     st_.get("entry_price"),
+                "Current $":   live.get("current_price"),
+                "Legs":        f"{legs}/3",
+                "% Sold":      pct_sold,
+                "Stop $":      st_.get("current_stop"),
+                "T1 $":        st_.get("t1"),
+                "T2 $":        st_.get("t2"),
+                "T3 $":        st_.get("t3"),
+                "Unreal P&L":  live.get("unrealized_pl"),
+            })
+        pyr_df = pd.DataFrame(rows)
+        st.dataframe(
+            pyr_df, use_container_width=True, hide_index=True,
+            column_config={
+                "% Sold":     st.column_config.NumberColumn("% Sold", format="%.0f%%"),
+                "Unreal P&L": st.column_config.NumberColumn("Unreal P&L", format="$%.2f"),
+            },
+        )
+    else:
+        st.caption("No pyramid positions open (or pyramid mode is disabled in configs/alerts_live.yaml).")
 
     st.divider()
 
@@ -5427,7 +5886,8 @@ def render_paper_trade():
     _stock_state = {"positions": []}
     if os.path.exists(_STOCK_STATE):
         try:
-            _stock_state = _json.loads(open(_STOCK_STATE).read())
+            with open(_STOCK_STATE) as _f:
+                _stock_state = _json.loads(_f.read())
         except Exception:
             pass
 
@@ -5444,7 +5904,8 @@ def render_paper_trade():
             from alpaca_trader import close_all_positions
             res = close_all_positions(client)
             if res["ok"]:
-                open(_STOCK_STATE, "w").write(_json.dumps({"positions": []}, indent=2))
+                with open(_STOCK_STATE, "w") as _f:
+                    _f.write(_json.dumps({"positions": []}, indent=2))
                 st.success("All stock positions closed and state cleared")
             else:
                 st.error(f"Error: {res['error']}")
@@ -5456,14 +5917,16 @@ def render_paper_trade():
         st.session_state["show_stock_log"] = not st.session_state.get("show_stock_log", False)
     if st.session_state.get("show_stock_log", False):
         if os.path.exists(_STOCK_LOG):
-            lines = open(_STOCK_LOG).readlines()
+            with open(_STOCK_LOG) as _f:
+                lines = _f.readlines()
             st.code("".join(lines[-60:]), language="text")
         else:
             st.info("No log yet — start the daemon or run a scan first.")
 
     with st.expander("⚙️  Stock Paper Config (stock_paper.yaml)", expanded=False):
         if os.path.exists(_STOCK_CONFIG):
-            st.code(open(_STOCK_CONFIG).read(), language="yaml")
+            with open(_STOCK_CONFIG) as _f:
+                st.code(_f.read(), language="yaml")
 
     # ── Auto-refresh ──────────────────────────────────────────────────────────
     if auto_ref:
@@ -5478,6 +5941,15 @@ def render_spy_alerts():
     """SPY BB+RSI Reversal Alert Log — live feed + daily P&L from dtb-live."""
     from datetime import date, timedelta
     import math
+    from alpaca_trader import make_client
+    from spy_reversal_log import (
+        sync_from_alpaca as _spy_sync,
+        load_logs as _spy_load_logs,
+        get_records as _spy_get_records,
+        available_dates as _spy_available_dates,
+        pair_trades as _spy_pair_trades,
+        parse_orders as _spy_parse_orders,
+    )
 
     st.markdown("## 📡 SPY Reversal Alerts")
     st.markdown(
@@ -5517,15 +5989,16 @@ def render_spy_alerts():
 
     # ── Fetch records ─────────────────────────────────────────────────────────
     @st.cache_data(ttl=120, show_spinner=False)
-    def _live_records(_key: str):
+    def _live_records(_key: str, _api_key: str, _sec_key: str):
         from alpaca.trading.requests import GetOrdersRequest
         from alpaca.trading.enums import QueryOrderStatus
         from datetime import timezone
         import logging
+        _client  = make_client(_api_key, _sec_key)
         start_dt = datetime.combine(start_d, datetime.min.time()).replace(tzinfo=timezone.utc)
         end_dt   = datetime.combine(end_d,   datetime.max.time()).replace(tzinfo=timezone.utc)
         try:
-            raw = client.get_orders(GetOrdersRequest(
+            raw = _client.get_orders(GetOrdersRequest(
                 status=QueryOrderStatus.ALL,
                 after=start_dt,
                 until=end_dt,
@@ -5538,7 +6011,7 @@ def render_spy_alerts():
 
     with st.spinner("Loading SPY alerts…"):
         if live_mode:
-            records = _live_records(f"{start_d}_{end_d}")
+            records = _live_records(f"{start_d}_{end_d}", api_key, sec_key)
         else:
             records = _spy_load_logs(start_d, end_d)
 
@@ -5700,6 +6173,15 @@ def render_spy_alerts():
 def render_options_log():
     """Options 45-60 DTE Trade Log — live feed + daily P&L from Alpaca."""
     from datetime import date, timedelta
+    from alpaca_trader import make_client
+    from options_trade_log import (
+        sync_from_alpaca as _opt_sync,
+        load_logs as _opt_load_logs,
+        get_records as _opt_get_records,
+        available_dates as _opt_available_dates,
+        pair_trades as _opt_pair_trades,
+        parse_orders as _opt_parse_orders,
+    )
 
     st.markdown("## 📋 Options 45-60 DTE Trade Log")
     st.markdown(
@@ -5740,15 +6222,16 @@ def render_options_log():
             st.rerun()
 
     @st.cache_data(ttl=120, show_spinner=False)
-    def _live_opt_records(_key: str):
+    def _live_opt_records(_key: str, _api_key: str, _sec_key: str):
         from alpaca.trading.requests import GetOrdersRequest
         from alpaca.trading.enums import QueryOrderStatus
         from datetime import timezone
         import logging
+        _client  = make_client(_api_key, _sec_key)
         start_dt = datetime.combine(start_d, datetime.min.time()).replace(tzinfo=timezone.utc)
         end_dt   = datetime.combine(end_d,   datetime.max.time()).replace(tzinfo=timezone.utc)
         try:
-            raw = client.get_orders(GetOrdersRequest(
+            raw = _client.get_orders(GetOrdersRequest(
                 status=QueryOrderStatus.ALL,
                 after=start_dt,
                 until=end_dt,
@@ -5761,7 +6244,7 @@ def render_options_log():
 
     with st.spinner("Loading options trades…"):
         if live_mode:
-            records = _live_opt_records(f"{start_d}_{end_d}_{dte_filter}")
+            records = _live_opt_records(f"{start_d}_{end_d}_{dte_filter}", api_key, sec_key)
         else:
             records = _opt_load_logs(start_d, end_d)
 
@@ -5913,6 +6396,7 @@ def render_options_log():
 def render_options_backtest():
     """Walk-forward backtest for the 45-60 DTE options swing strategy."""
     import plotly.graph_objects as _go4
+    from options_backtest_runner import run_options_backtest
 
     st.markdown("## 📊 Options 45-60 DTE Backtest")
     st.markdown(
@@ -5941,15 +6425,28 @@ def render_options_backtest():
                                               key="ob_capital")
             max_positions   = st.number_input("Max Concurrent Positions",
                                               min_value=1, max_value=10,
-                                              value=4, step=1, key="ob_maxpos")
+                                              value=3, step=1, key="ob_maxpos",
+                                              help="3 is the validated default (config.yaml).")
         with c3:
-            tp_pct   = st.slider("Take Profit %", 10, 100, 50, key="ob_tp") / 100
-            sl_pct   = st.slider("Stop Loss %",   10, 60,  25, key="ob_sl") / 100
-            dte_entry = st.slider("DTE at Entry", 40, 65, 50, key="ob_dte")
+            tp_pct   = st.slider("Take Profit %", 10, 200, 100, key="ob_tp",
+                                 help="100% = option doubles. Validated default.") / 100
+            sl_pct   = st.slider("Stop Loss %",   10, 90,  50, key="ob_sl",
+                                 help="50% of premium. Validated default.") / 100
+            dte_entry = st.slider("DTE at Entry", 40, 65, 52, key="ob_dte",
+                                  help="52 is the validated default.")
 
-        regime_filter = st.toggle("SPY Regime Filter", value=True, key="ob_regime",
-                                  help="Only enter calls when SPY > SMA200")
-        min_score     = st.slider("Min Signal Score", 1.0, 10.0, 7.0, 0.5, key="ob_score")
+        c4, c5 = st.columns(2)
+        with c4:
+            regime_filter = st.toggle("SPY Regime Filter", value=True, key="ob_regime",
+                                      help="Only enter calls when SPY > SMA200")
+            min_score     = st.slider("Min Signal Score", 1.0, 10.0, 7.5, 0.5, key="ob_score",
+                                      help="7.5 is the validated default.")
+        with c5:
+            percent_per_trade = st.slider("Risk per Trade (% of equity)", 0.5, 10.0, 2.0, 0.5,
+                                          key="ob_risk_pct",
+                                          help="Position sizing per trade, as % of current equity. "
+                                               "2.0% is the validated default (config.yaml sizing.percent_per_trade). "
+                                               "This was previously hardcoded to 5.0% and not exposed here — fixed.")
 
         tickers = get_selected_tickers()
 
@@ -5983,6 +6480,7 @@ def render_options_backtest():
             max_positions     = int(max_positions),
             use_regime_filter = regime_filter,
             min_score_override = float(min_score),
+            percent_per_trade = float(percent_per_trade),
             progress_cb       = _cb,
         )
 
@@ -6095,6 +6593,7 @@ def render_options_paper_trade():
     import json as _json
     from datetime import date, timedelta
     from pathlib import Path as _Path
+    from alpaca_trader import make_client, get_account_summary
 
     st.markdown("## 🟢 Options 45-60 DTE Paper Trade")
     st.markdown(
@@ -6396,6 +6895,10 @@ def render_options_paper_trade():
 # ═════════════════════════════════════════════════════════════════════════════
 
 def render_calendar():
+    from economic_calendar import (
+        get_upcoming_events, get_news_feed, get_event_context,
+        get_earnings_calendar, _CATEGORY_META as _CAL_META,
+    )
     st.markdown(
         "<div class='scanner-header'>"
         "<span style='font-size:2rem'>🗓️</span>"
@@ -6431,8 +6934,9 @@ def render_calendar():
         st.divider()
 
     # ── Tabs ──────────────────────────────────────────────────────────────────
-    tab_cal, tab_news, tab_earn, tab_impact = st.tabs(
-        ["📅 Event Calendar", "📰 News Feed", "💰 Earnings Watch", "🎯 Strategy Impact"]
+    tab_cal, tab_news, tab_earn, tab_impact, tab_vix, tab_breadth, tab_sector, tab_rates = st.tabs(
+        ["📅 Event Calendar", "📰 News Feed", "💰 Earnings Watch", "🎯 Strategy Impact",
+         "📉 VIX & Volatility", "🌊 Breadth", "🔄 Sector Rotation", "🏦 Rates"]
     )
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -6683,6 +7187,115 @@ and [bls.gov/schedule](https://www.bls.gov/schedule/news_release/cpi.htm).
 | High event **> 7 days away** | No special adjustment needed for swing timeframe |
 """)
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # TAB 5: VIX & Volatility
+    # ─────────────────────────────────────────────────────────────────────────
+    with tab_vix:
+        from market_context import get_vix, get_regime_summary
+        vix = get_vix()
+        v1, v2, v3 = st.columns(3)
+        v1.metric("VIX Level", f"{vix['level']:.1f}")
+        v2.metric("1-Year Percentile Rank", f"{vix['rank_1y']:.0f}%ile")
+        regime = get_regime_summary()
+        v3.metric("Regime", regime["label"])
+
+        if vix["rank_1y"] >= 80:
+            st.error("🔴 High fear zone — options are expensive, favor selling premium over buying; "
+                      "expect wide whipsaws on breakout setups.", icon="⚠️")
+        elif vix["rank_1y"] >= 60:
+            st.warning("🟡 Elevated — tighten stops, size down new entries.", icon="⚠️")
+        elif vix["rank_1y"] <= 20:
+            st.success("🟢 Low fear — cheap options, calmer price action, but complacency risk near highs.", icon="✅")
+        else:
+            st.info("⚪ Normal range — no special adjustment.", icon="ℹ️")
+
+        st.caption("Rank = % of the last year's trading days where VIX closed below today's level. "
+                   "Shared across the app via market_context.get_vix() — same number everywhere.")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # TAB 6: Breadth
+    # ─────────────────────────────────────────────────────────────────────────
+    with tab_breadth:
+        from market_context import get_breadth
+        st.caption("% of your tracked universe trading above its 50-day / 200-day moving average — "
+                   "a broad read on whether strength is widespread or narrow.")
+        b_refresh = st.button("🔄  Refresh Breadth", key="breadth_refresh")
+        if "breadth_data" not in st.session_state or b_refresh:
+            with st.spinner("Computing breadth across your universe…"):
+                st.session_state.breadth_data = get_breadth(list(WATCHLIST_TICKERS))
+
+        bd = st.session_state.breadth_data
+        if bd["n"] == 0:
+            st.warning("Could not compute breadth — data fetch failed.", icon="⚠️")
+        else:
+            b1, b2, b3 = st.columns(3)
+            b1.metric("Above 50-day MA", f"{bd['pct_above_50ma']:.0f}%")
+            b2.metric("Above 200-day MA", f"{bd['pct_above_200ma']:.0f}%")
+            b3.metric("Universe Size", bd["n"])
+
+            if bd["pct_above_50ma"] >= 60:
+                st.success(f"Healthy — {bd['pct_above_50ma']:.0f}% of the universe is trending up. "
+                          "Breakout/momentum strategies have wind at their back.", icon="✅")
+            elif bd["pct_above_50ma"] >= 40:
+                st.warning("Mixed — be selective, don't force setups.", icon="⚠️")
+            else:
+                st.error("Weak — most of the universe is below its 50-day MA. Favor defensive setups "
+                        "or sit on hands over chasing longs.", icon="⚠️")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # TAB 7: Sector Rotation
+    # ─────────────────────────────────────────────────────────────────────────
+    with tab_sector:
+        from market_context import get_sector_performance
+        st.caption("1-day / 1-week / 1-month performance of the 11 SPDR sector ETFs — where money is "
+                   "rotating into and out of.")
+        with st.spinner("Loading sector performance…"):
+            sectors = get_sector_performance()
+
+        if not sectors:
+            st.warning("Could not fetch sector data.", icon="⚠️")
+        else:
+            rows = [
+                {"Sector": f"{etf} — {d['name']}", "1D %": d["chg_1d"], "1W %": d["chg_1w"], "1M %": d["chg_1m"]}
+                for etf, d in sectors.items()
+            ]
+            sec_df = pd.DataFrame(rows).sort_values("1M %", ascending=False, na_position="last")
+
+            def _sec_style(row):
+                v = row["1M %"]
+                if pd.isna(v):
+                    return [""] * len(row)
+                color = "#16a34a" if v > 0 else "#dc2626"
+                return [f"color:{color}"] * len(row)
+
+            st.dataframe(
+                sec_df.style.apply(_sec_style, axis=1).format(
+                    {"1D %": "{:+.2f}%", "1W %": "{:+.2f}%", "1M %": "{:+.2f}%"}, na_rep="—"
+                ),
+                use_container_width=True, hide_index=True,
+            )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # TAB 8: Rates
+    # ─────────────────────────────────────────────────────────────────────────
+    with tab_rates:
+        from market_context import get_yield_curve
+        yc = get_yield_curve()
+        if yc["y10"] is None:
+            st.warning("Could not fetch yield data.", icon="⚠️")
+        else:
+            r1, r2, r3 = st.columns(3)
+            r1.metric("10-Year Treasury", f"{yc['y10']:.2f}%")
+            r2.metric("3-Month Treasury", f"{yc['m3']:.2f}%")
+            r3.metric("10Y – 3M Spread", f"{yc['spread']:+.2f}%")
+
+            if yc["inverted"]:
+                st.error("🔴 Yield curve is **inverted** (short rates above long rates) — historically a "
+                        "recession-risk signal with a long, variable lag. Not an immediate trading signal, "
+                        "but worth knowing.", icon="⚠️")
+            else:
+                st.success("🟢 Yield curve is normal (upward-sloping).", icon="✅")
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Influencer Tracker — Jensen Huang · Trump
@@ -6931,7 +7544,11 @@ def _inf_fetch_prices(tickers_tuple: tuple) -> pd.DataFrame:
     if not tickers:
         return pd.DataFrame()
     try:
-        raw = yf.download(tickers, period="2d", progress=False,
+        # 5d, not 2d — yfinance often includes a placeholder row for the
+        # current calendar day with NaN Close (but a real Volume figure)
+        # before that day's data has posted. Dropping it needs a wider
+        # window than 2d so two real trading days still remain afterward.
+        raw = yf.download(tickers, period="5d", progress=False,
                           auto_adjust=True, group_by="ticker")
     except Exception:
         return pd.DataFrame()
@@ -6943,7 +7560,10 @@ def _inf_fetch_prices(tickers_tuple: tuple) -> pd.DataFrame:
                 raw[ticker] if ticker in raw.columns.get_level_values(0)
                 else pd.DataFrame()
             )
-            if df is None or df.empty or len(df) < 2:
+            if df is None or df.empty:
+                continue
+            df = df.dropna(subset=["Close"])
+            if len(df) < 2:
                 continue
             prev  = float(df["Close"].iloc[-2])
             last  = float(df["Close"].iloc[-1])
@@ -7118,6 +7738,7 @@ def render_influencers():
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _home_day_trades(_key: str) -> pd.DataFrame:
+    from combined_screener import run_combined_screener
     # Use watchlist only (~144 tickers) so the morning brief loads in seconds
     df = run_combined_screener(tickers=WATCHLIST_TICKERS, min_score=4, max_workers=10, lookback_days=200)
     if df.empty:
@@ -7130,31 +7751,59 @@ def _home_day_trades(_key: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _home_breakouts(_key: str) -> pd.DataFrame:
+    from breakout_screener import run_breakout_screener
     df = run_breakout_screener(tickers=WATCHLIST_TICKERS, recent_bars=3)
     if df.empty:
         return df
-    # BULL > BEAR descending so bullish setups appear first
+    # Quality gates: signal must still be holding (not failed) and not too extended
+    if "P&L %" in df.columns:
+        df = df[df["P&L %"] >= -2.0]          # drop signals already down >2% (failed)
+        df = df[df["P&L %"] <= 12.0]          # drop stocks already up >12% (too extended)
+    if "EMA Trend" in df.columns:
+        # For bullish, require aligned trend (EMA50 > EMA200)
+        bull_mask = (df["Direction"] == "BULLISH") & (df["EMA Trend"] == "BULL")
+        bear_mask = df["Direction"] == "BEARISH"
+        df = df[bull_mask | bear_mask]
+    if df.empty:
+        return df
+    # BULL > BEAR descending so bullish setups appear first; most recent first
     return df.sort_values(["Direction", "Bars Ago"], ascending=[False, True]).head(5).reset_index(drop=True)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _home_options(_key: str) -> pd.DataFrame:
-    # iv_rank_min=0: disable the VIX gate — screener returns empty when VIX<20
-    # max_entry_sigma=0.70: allow growth stocks (AMD 67%, PLTR 53%, etc.)
+    from swing_options_screener import run_swing_options_screener
+    # Conviction filter: score≥7 means EMA+Trend+MACD+ADX+Supertrend all firing.
+    # max_entry_sigma=0.55 keeps us out of high-vol lottery-ticket names.
     df = run_swing_options_screener(
         tickers=WATCHLIST_TICKERS,
-        min_score=4.5,
+        min_score=7.0,
         dte=50.0,
-        params={"max_entry_sigma": 0.70, "iv_rank_min": 0, "iv_rank_max": 100},
+        params={
+            "max_entry_sigma": 0.55,
+            "iv_rank_min": 0, "iv_rank_max": 100,
+            "delta_min": 0.45, "delta_max": 0.65,
+            "min_oi": 300,
+            "min_volume": 25,
+            "max_spread_pct": 0.10,
+            "adx_min": 25,
+        },
     )
     if df.empty:
         return df
-    ok = df[df["_passes_greeks"]].head(5)
-    return (ok if len(ok) >= 3 else df.head(5)).reset_index(drop=True)
+    # Hard gates: Greeks + liquidity + 3 core technicals must all pass
+    mask_greeks = df["_passes_greeks"].astype(bool)
+    mask_liq    = df["_passes_liq"].astype(bool) if "_passes_liq" in df.columns else pd.Series(True, index=df.index)
+    mask_ema    = df["EMA Aligned"].eq("✅") if "EMA Aligned" in df.columns else pd.Series(True, index=df.index)
+    mask_t200   = df["Trend 200"].eq("✅")   if "Trend 200"   in df.columns else pd.Series(True, index=df.index)
+    mask_macd   = df["MACD OK"].eq("✅")     if "MACD OK"     in df.columns else pd.Series(True, index=df.index)
+    conviction  = df[mask_greeks & mask_liq & mask_ema & mask_t200 & mask_macd].head(5)
+    return conviction.reset_index(drop=True)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _home_events(_key: str) -> list:
+    from economic_calendar import get_upcoming_events, get_earnings_calendar
     et  = pytz.timezone("America/New_York")
     today_str = datetime.now(et).strftime("%Y-%m-%d")
     macro = [e for e in get_upcoming_events(days_ahead=1, include_earnings=False)
@@ -7167,9 +7816,17 @@ def _home_events(_key: str) -> list:
         )
         earn = [e for e in get_earnings_calendar(broad, days=2)
                 if str(e.get("date", "")) == today_str]
+        # Earnings otherwise come back in ThreadPoolExecutor completion order
+        # (effectively random) — surface the tickers this dashboard already
+        # tracks as high-priority first, so the ones you actually care about
+        # aren't buried in a long, unsorted list.
+        _priority = set(WATCHLIST_TICKERS) | set(_HIGH_GROWTH_TICKERS)
+        earn.sort(key=lambda e: e.get("event", "").split(" ")[0] not in _priority)
     except Exception as _e:
         earn = []
-    return earn + macro
+    # Macro/high-impact events first, earnings after — see render loop below
+    # for the top-5-earnings cap that keeps this panel readable.
+    return macro + earn
 
 
 def _home_price(val) -> str:
@@ -7177,6 +7834,130 @@ def _home_price(val) -> str:
         return f"${float(val):.2f}"
     except Exception:
         return "—"
+
+
+def _home_tool_row(ticker, signal, entry, stop, target, note) -> dict:
+    return {
+        "Ticker": ticker, "Signal": signal,
+        "Entry": _home_price(entry), "Stop": _home_price(stop), "Target": _home_price(target),
+        "Note": note,
+    }
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _home_tool_alerts(_key: str) -> pd.DataFrame:
+    from alerts_engine import generate_daily_alerts
+    df = generate_daily_alerts(tickers=WATCHLIST_TICKERS, min_score=6, max_workers=10)
+    if df.empty:
+        return pd.DataFrame()
+    df = df.sort_values(["Score", "R/R"], ascending=False).head(5)
+    return pd.DataFrame([
+        _home_tool_row(r["Symbol"], r.get("Direction", "—"), r.get("Entry"), r.get("Stop"), r.get("T2"),
+                        f"Score {r.get('Score','—')} · R/R {r.get('R/R','—')}")
+        for _, r in df.iterrows()
+    ])
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _home_tool_livermore(_key: str) -> pd.DataFrame:
+    from livermore_pivotal_screener import run_screener
+    df = run_screener(tickers=WATCHLIST_TICKERS, recent_bars=5, trend_aligned=True)
+    if df.empty:
+        return pd.DataFrame()
+    df = df.sort_values("Bars Ago", ascending=True).head(5)
+    return pd.DataFrame([
+        _home_tool_row(r["Ticker"], r.get("Signal", "—").replace("_", " "), r.get("Pivot Level"), None, None,
+                        f"{r.get('% from Pivot','—')}% from pivot · {r.get('Trend (EMA)','—')}")
+        for _, r in df.iterrows()
+    ])
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _home_tool_gap(_key: str) -> pd.DataFrame:
+    from gap_screener import run_gap_screener
+    df = run_gap_screener(tickers=WATCHLIST_TICKERS, min_gap_pct=1.0, vol_mult=1.5, recent_bars=5)
+    if df.empty:
+        return pd.DataFrame()
+    if "R/R" in df.columns:
+        df = df.dropna(subset=["R/R"]).sort_values("R/R", ascending=False)
+    df = df.head(5)
+    return pd.DataFrame([
+        _home_tool_row(r["Ticker"], r.get("Trade Bias", r.get("Signal", "—")),
+                        r.get("Entry", r.get("Close")), r.get("Stop"), r.get("Target"),
+                        f"{r.get('Gap Type','—')} · R/R {r.get('R/R','—')}")
+        for _, r in df.iterrows()
+    ])
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _home_tool_ema(_key: str) -> pd.DataFrame:
+    from ema_crossover_screener import run_ema_screener
+    df = run_ema_screener(tickers=WATCHLIST_TICKERS, recent_bars=5)
+    if df.empty:
+        return pd.DataFrame()
+    if "R/R" in df.columns:
+        df = df.sort_values("R/R", ascending=False)
+    df = df.head(5)
+    return pd.DataFrame([
+        _home_tool_row(r["Ticker"], r.get("Signal", "—"), r.get("Entry"), r.get("Stop"), r.get("Target 1"),
+                        f"R/R {r.get('R/R','—')} · {r.get('Bars Ago','—')}d ago")
+        for _, r in df.iterrows()
+    ])
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _home_tool_rsi(_key: str) -> pd.DataFrame:
+    from rsi_screener import run_rsi_screener
+    df = run_rsi_screener(tickers=WATCHLIST_TICKERS, recent_bars=5)
+    if df.empty:
+        return pd.DataFrame()
+    df = df.sort_values("Vol vs Avg", ascending=False).head(5)
+    return pd.DataFrame([
+        _home_tool_row(r["Ticker"], r.get("Signal", "—").replace("_", " "), r.get("Close"), r.get("Stop"), r.get("Target"),
+                        f"RSI {r.get('RSI','—')} · Vol {r.get('Vol vs Avg','—')}x")
+        for _, r in df.iterrows()
+    ])
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _home_tool_macd(_key: str) -> pd.DataFrame:
+    from macd_screener import run_macd_screener
+    df = run_macd_screener(tickers=WATCHLIST_TICKERS, recent_bars=5)
+    if df.empty:
+        return pd.DataFrame()
+    sort_col = "Vol vs Avg" if "Vol vs Avg" in df.columns else df.columns[0]
+    df = df.sort_values(sort_col, ascending=False).head(5)
+    return pd.DataFrame([
+        _home_tool_row(r["Ticker"], r.get("Signal", "—").replace("_", " "), r.get("Close"), r.get("Stop"), r.get("Target"),
+                        f"Vol {r.get('Vol vs Avg','—')}x")
+        for _, r in df.iterrows()
+    ])
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _home_tool_minervini(_key: str) -> pd.DataFrame:
+    from minervini_screener import run_minervini_screener
+    df = run_minervini_screener(tickers=WATCHLIST_TICKERS, min_trend_score=7)
+    if df.empty:
+        return pd.DataFrame()
+    sort_col = "RS Rating" if "RS Rating" in df.columns else "RS (raw)"
+    df = df.sort_values(sort_col, ascending=False).head(5)
+    return pd.DataFrame([
+        _home_tool_row(r["Ticker"], r.get("Stage", "—"), r.get("Entry"), r.get("Stop"), r.get("Target (3:1)"),
+                        f"VCP {r.get('VCP','—')} · {r.get('% from Pivot','—')}% from pivot")
+        for _, r in df.iterrows()
+    ])
+
+
+_HOME_TOOL_SPOTLIGHT = [
+    ("🔔 Daily Alerts",    _home_tool_alerts,    "alerts"),
+    ("🔴 Livermore",       _home_tool_livermore, "livermore"),
+    ("🕳️ Gap Scanner",     _home_tool_gap,       "gap"),
+    ("📉 EMA Crossover",   _home_tool_ema,       "ema"),
+    ("〰️ RSI",             _home_tool_rsi,       "rsi"),
+    ("〽️ MACD",            _home_tool_macd,      "macd"),
+    ("📐 Minervini SEPA",  _home_tool_minervini, "minervini"),
+]
 
 
 def _home_sig_badge(signal: str) -> str:
@@ -7200,8 +7981,13 @@ def render_home():
     if before_open:
         mins_left = int((market_o - now).total_seconds() // 60)
         st.info(f"Market opens in **{mins_left} min** — refreshing automatically at 9:30 AM ET.")
-        _ms_to_open = min(60_000, int((market_o - now).total_seconds() * 1000))
-        st_autorefresh(interval=_ms_to_open, key="home_premarket_refresh")
+        # This page runs ~10 scanners sequentially, which can take well over a
+        # minute (more under yfinance rate limiting). A 60s refresh cadence this
+        # far out would restart the whole page mid-scan forever, so only tighten
+        # to 60s once we're close to the open; otherwise refresh every 10 min.
+        ms_to_open  = int((market_o - now).total_seconds() * 1000)
+        interval_ms = min(60_000, ms_to_open) if mins_left <= 10 else min(600_000, ms_to_open)
+        st_autorefresh(interval=interval_ms, key="home_premarket_refresh")
 
     # ── Header ────────────────────────────────────────────────────────────────
     hc1, hc2 = st.columns([5, 1])
@@ -7271,7 +8057,7 @@ def render_home():
     col3, col4 = st.columns([3, 2])
 
     with col3:
-        st.markdown("#### 🎯 Options Recs (45-60 DTE)")
+        st.markdown("#### 🎯 Conviction Options (45-60 DTE · Score ≥ 7 · Greeks + Liq ✅)")
         with st.spinner("Scanning options…"):
             opt_df = _home_options(hour_key)
         if opt_df.empty:
@@ -7280,14 +8066,22 @@ def render_home():
             tbl = []
             for _, r in opt_df.iterrows():
                 tbl.append({
-                    "Symbol":    r["Symbol"],
-                    "Type":      r.get("Direction", "—"),
-                    "Strike":    str(int(r["Strike"])) if pd.notna(r.get("Strike")) else "—",
-                    "Premium":   _home_price(r.get("Premium")),
-                    "Delta":     f"{float(r['Delta']):.2f}" if pd.notna(r.get("Delta")) else "—",
-                    "Theta/d":   f"{float(r['Theta/day']):.4f}" if pd.notna(r.get("Theta/day")) else "—",
-                    "Score":     f"{float(r['Score']):.1f}" if pd.notna(r.get("Score")) else "—",
-                    "Greeks":    "✅" if "✅" in str(r.get("Greeks OK", "")) else "❌",
+                    "Symbol":   r["Symbol"],
+                    "Type":     r.get("Direction", "—"),
+                    "Expiry":   r.get("Expiry", "—"),
+                    "DTE":      r.get("DTE", "—"),
+                    "Strike":   str(int(r["Strike"])) if pd.notna(r.get("Strike")) else "—",
+                    "Bid":      _home_price(r.get("Bid")),
+                    "Ask":      _home_price(r.get("Ask")),
+                    "Mid":      _home_price(r.get("Premium")),
+                    "IV%":      f"{r.get('IV', 0):.1f}%" if pd.notna(r.get("IV")) else "—",
+                    "Vol":      f"{int(r.get('Volume', 0)):,}" if pd.notna(r.get("Volume")) else "—",
+                    "OI":       f"{int(r.get('OI', 0)):,}" if pd.notna(r.get("OI")) else "—",
+                    "Delta":    f"{float(r['Delta']):.2f}" if pd.notna(r.get("Delta")) else "—",
+                    "Theta/d":  f"{float(r['Theta/day']):.4f}" if pd.notna(r.get("Theta/day")) else "—",
+                    "Score":    f"{float(r['Score']):.1f}" if pd.notna(r.get("Score")) else "—",
+                    "Greeks":   "✅" if "✅" in str(r.get("Greeks OK", "")) else "❌",
+                    "Liq":      "✅" if "✅" in str(r.get("Liq OK", "")) else "❌",
                 })
             st.dataframe(pd.DataFrame(tbl), use_container_width=True, hide_index=True)
 
@@ -7296,13 +8090,22 @@ def render_home():
         with st.spinner("Loading calendar…"):
             events = _home_events(day_key)
         shown = 0
+        earn_shown = 0
         for ev in events:
             impact = ev.get("impact", "LOW")
             cat    = ev.get("category", "").upper()
-            if impact not in ("HIGH", "MEDIUM") and cat not in ("EARNINGS", "EARNING"):
-                continue
-            shown += 1
             is_earn = cat in ("EARNINGS", "EARNING")
+            if impact not in ("HIGH", "MEDIUM") and not is_earn:
+                continue
+            # Macro events already come first (see _home_events) and are
+            # normally just 1-3 — show all of those, but cap earnings to the
+            # top 5 (priority tickers first) so a busy earnings day doesn't
+            # dump 50+ unsorted rows into this panel.
+            if is_earn:
+                if earn_shown >= 5:
+                    continue
+                earn_shown += 1
+            shown += 1
             badge_color = "#164e63" if is_earn else ("#7f1d1d" if impact == "HIGH" else "#78350f")
             badge_text  = "EARNINGS" if is_earn else impact
             badge_fg    = "#67e8f9" if is_earn else ("#fca5a5" if impact == "HIGH" else "#fcd34d")
@@ -7318,6 +8121,30 @@ def render_home():
             )
         if shown == 0:
             st.caption("No major events or earnings today.")
+        else:
+            total_earn = sum(1 for ev in events if ev.get("category", "").upper() in ("EARNINGS", "EARNING"))
+            if total_earn > earn_shown:
+                st.caption(f"+{total_earn - earn_shown} more earnings today — see Macro Calendar → Earnings Watch")
+
+    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+
+    # ── Row 3: Top 5 by individual tool ───────────────────────────────────────
+    st.markdown("#### 🧭 Top Picks by Tool")
+    st.caption("Top 5 setups from each scanner, run against your watchlist. Click a tool in the sidebar for full settings.")
+    tool_tabs = st.tabs([label for label, _, _ in _HOME_TOOL_SPOTLIGHT])
+    for tab, (label, fetch_fn, scanner_id) in zip(tool_tabs, _HOME_TOOL_SPOTLIGHT):
+        with tab:
+            try:
+                with st.spinner(f"Scanning {label}…"):
+                    tool_df = fetch_fn(hour_key)
+            except Exception as e:
+                st.caption(f"Unavailable right now ({e}).")
+                continue
+            if tool_df.empty:
+                st.caption("No qualifying setups right now.")
+            else:
+                st.dataframe(tool_df, use_container_width=True, hide_index=True)
+            st.markdown(f"[Open full {label.split(' ', 1)[-1]} scanner →](?scanner={scanner_id})")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -7373,18 +8200,11 @@ def _weekly_opts_trading_dates(n: int) -> set:
     return result
 
 
-@st.cache_data(ttl=900, show_spinner=False)
 def _fetch_vix_data() -> tuple:
-    """Return (vix_level, vix_percentile_rank_1yr)."""
-    try:
-        vix = yf.Ticker("^VIX")
-        fi = vix.fast_info
-        current = float(fi.get("lastPrice") or fi.get("previousClose") or 20)
-        hist = vix.history(period="1y", auto_adjust=True)
-        rank = float((hist["Close"] < current).mean() * 100) if len(hist) > 10 else 50.0
-        return round(current, 2), round(rank, 1)
-    except Exception:
-        return 20.0, 50.0
+    """Return (vix_level, vix_percentile_rank_1yr). Shared source: market_context.get_vix()."""
+    from market_context import get_vix
+    v = get_vix()
+    return v["level"], v["rank_1y"]
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -7425,7 +8245,7 @@ def _fetch_weekly_calls(symbol: str, max_dte: int) -> tuple:
 
         above_ema20 = above_sma50 = rsi14 = None
         try:
-            hist = ticker.history(period="60d", auto_adjust=True)
+            hist = ticker.history(period="60d", auto_adjust=True).dropna(subset=["Close"])
             close = hist["Close"]
             if len(close) >= 20:
                 above_ema20 = bool(price > close.ewm(span=20).mean().iloc[-1])
@@ -7504,6 +8324,7 @@ def _scan_weekly_options(
     rsi_max: float,
     spy_chg: float,              # SPY % change today — for relative strength
     max_premium: float = 999.0,  # max mid price per share (e.g. 1.50 = $150/contract)
+    min_premium: float = 0.0,    # min mid price — floor removes sub-$0.30 lottery tickets
     min_vol_ratio: float = 0.0,  # min volume/avg-volume surge (0 = no filter)
     min_rel_str: float = -999.0, # min relative strength vs SPY %
 ) -> pd.DataFrame:
@@ -7549,7 +8370,7 @@ def _scan_weekly_options(
         # ── IV, spread, and premium filters ──────────────────────────────────
         df = df[df["iv_pct"] <= max_iv_pct]
         df = df[df["spread_pct"] <= max_spread_pct]
-        df = df[df["mid"] <= max_premium]
+        df = df[(df["mid"] >= min_premium) & (df["mid"] <= max_premium)]
         if df.empty:
             continue
 
@@ -7658,11 +8479,11 @@ def _scan_weekly_options(
 def render_weekly_options():
     clicked = _page_header(
         "⚡", "Weekly Options (0-7 DTE)",
-        "Calls expiring within 7 calendar days of purchase. Backtest-optimized defaults: "
-        "RSI 55–70 enabled, delta 0.20–0.85. RSI filter alone improved win rate by ~7 pp. "
-        "Auto-refreshes every 15 min.",
+        "Calls expiring within 7 calendar days of purchase. Scores momentum, relative "
+        "strength, and options flow. Auto-refreshes every 15 min.",
         scan_key="wkly_opts_scan_btn", last_key="wkly_opts_time",
     )
+    st.caption(backtest_badges.weekly_opts_badge())
 
     with st.expander("⚙️ Settings", expanded=True):
         st.markdown("**Universe**")
@@ -7755,25 +8576,37 @@ def render_weekly_options():
 
     # ── VIX condition banner ──────────────────────────────────────────────────
     vix_level, vix_rank = _fetch_vix_data()
+    high_vix_mode = vix_rank > 70
+
     if vix_level < 20:
         st.success(
             f"VIX {vix_level:.1f}  (rank {vix_rank:.0f}th pct) — Low fear. IV is cheap, "
             "favorable for call buying."
         )
-    elif vix_level < 30:
+    elif vix_rank < 70:
         st.warning(
             f"VIX {vix_level:.1f}  (rank {vix_rank:.0f}th pct) — Elevated fear. "
             "Premium is pricier — consider tightening Max IV % filter."
         )
     else:
         st.error(
-            f"VIX {vix_level:.1f}  (rank {vix_rank:.0f}th pct) — High fear zone. "
+            f"🚨 VIX {vix_level:.1f}  (rank {vix_rank:.0f}th pct) — HIGH FEAR ZONE (rank > 70). "
             "Backtests show buying calls when VIX rank > 70 significantly lowers win rate. "
-            "Consider sitting out or using tighter filters."
+            "Filters will auto-tighten. Consider sitting out or waiting for lower VIX."
         )
 
     # ── Run scan only when button clicked ────────────────────────────────────
     if clicked:
+        # Force tighter filters in high-VIX mode
+        if high_vix_mode:
+            st.info("🔒 High-VIX mode: Auto-tightening filters (Max IV→100%, Delta→0.35–0.75, RSI→40–65).")
+            max_iv_pct = min(float(max_iv_pct), 100)  # Cap IV at 100% in high-VIX
+            delta_min = max(float(delta_min), 0.35)   # Tighten lower delta bound
+            delta_max = min(float(delta_max), 0.75)   # Tighten upper delta bound
+            if enable_rsi:
+                rsi_min = max(float(rsi_min), 40)    # No oversold stocks
+                rsi_max = min(float(rsi_max), 65)    # Avoid overbought
+
         if universe_choice.startswith("Focused"):
             tickers = tuple(_dedup(_HIGH_GROWTH_TICKERS + list(WATCHLIST_TICKERS)))
         elif universe_choice.startswith("NDQ100"):
@@ -7805,6 +8638,17 @@ def render_weekly_options():
             _rsi_min, _rsi_max,
             _spy_chg,
         )
+
+        # ── APPLY STRATEGY IMPROVEMENTS (0-7 DTE) ─────────────────────────────────
+        if not df.empty:
+            try:
+                if 'dte' not in df.columns:
+                    df['dte'] = max_dte
+                optimizer = StrategyOptimizer(account_size=100000)
+                df, _ = optimizer.apply_all_improvements(df)
+                st.toast("✅ Improvements applied: Earnings filter + IV rank + Position sizing")
+            except Exception as e:
+                st.toast(f"⚠️ Could not apply improvements: {e}", icon="⚠️")
 
         ts = pd.Timestamp.now()
         st.session_state.wkly_opts_df   = df
@@ -7848,6 +8692,24 @@ def render_weekly_options():
             "**uncheck EMA/SMA** · **raise Max IV %**"
         )
         return
+
+    # ── TOP 5 Ranked by GO Score (quick summary) ──────────────────────────────
+    st.subheader("🚀 Top 5 by GO Score")
+    top5 = df.nlargest(5, "go_score")[["symbol", "expiry", "dte", "strike", "mid", "delta", "iv_pct", "go_score", "signals"]].copy()
+    top5 = top5.rename(columns={
+        "symbol": "Ticker", "expiry": "Expiry", "dte": "DTE", "strike": "Strike",
+        "mid": "Mid $", "delta": "Δ", "iv_pct": "IV%", "go_score": "GO🎯", "signals": "Signals"
+    })
+    top5_styled = (
+        top5.style
+        .format({"Strike": "{:.2f}", "Mid $": "{:.2f}", "Δ": "{:.2f}", "IV%": "{:.1f}", "GO🎯": "{:.0f}"})
+        .apply(lambda row: ["background-color: rgba(255,75,75,0.20)"] * len(row) if row["GO🎯"] >= 8 else
+               ["background-color: rgba(255,165,0,0.15)"] * len(row) if row["GO🎯"] >= 6 else
+               [""] * len(row), axis=1)
+    )
+    st.dataframe(top5_styled, use_container_width=True, hide_index=True)
+
+    st.divider()
 
     # ── Main table ─────────────────────────────────────────────────────────────
     _COLS = {
@@ -7952,7 +8814,7 @@ def _fetch_weekly_puts(symbol: str, max_dte: int) -> tuple:
 
         above_ema20 = above_sma50 = rsi14 = None
         try:
-            hist  = ticker.history(period="60d", auto_adjust=True)
+            hist  = ticker.history(period="60d", auto_adjust=True).dropna(subset=["Close"])
             close = hist["Close"]
             if len(close) >= 20:
                 above_ema20 = bool(price > close.ewm(span=20).mean().iloc[-1])
@@ -8132,13 +8994,14 @@ def _scan_weekly_puts(
 
 
 def render_weekly_puts():
-    _page_header(
+    clicked = _page_header(
         "📉", "Weekly Puts (0-3 DTE)",
         "Puts expiring within 0–3 trading days. Scores bearish conviction: "
         "relative weakness vs SPY, put flow, volume surge, RSI overbought. "
         "Auto-refreshes every 15 min.",
         scan_key="wkly_puts_scan_btn", last_key="wkly_puts_time",
     )
+    st.caption(backtest_badges.weekly_puts_badge())
 
     with st.expander("⚙️ Settings", expanded=True):
         st.markdown("**Options chain filters**")
@@ -8186,6 +9049,10 @@ def render_weekly_puts():
 
     st_autorefresh(interval=900_000, key="wkly_puts_refresh")
 
+    # ── Init session state ────────────────────────────────────────────────────
+    if "wkly_puts_df" not in st.session_state:
+        st.session_state.wkly_puts_df = pd.DataFrame()
+
     vix_level, vix_rank = _fetch_vix_data()
     if vix_level >= 30:
         st.success(f"VIX {vix_level:.1f}  ({vix_rank:.0f}th pct) — High fear. IV rich — good for put selling; buying puts is expensive.")
@@ -8194,31 +9061,51 @@ def render_weekly_puts():
     else:
         st.info(f"VIX {vix_level:.1f}  ({vix_rank:.0f}th pct) — Low fear. Cheap puts but reversals can be sharp.")
 
-    tickers  = tuple(get_selected_tickers())
-    spy_chg  = _fetch_spy_chg()
-    _ticker_count_caption(list(tickers))
+    # ── Run scan only when button clicked ────────────────────────────────────
+    if clicked:
+        tickers  = tuple(get_selected_tickers())
+        spy_chg  = _fetch_spy_chg()
+        _ticker_count_caption(list(tickers))
 
-    prog = st.progress(0); status = st.empty()
-    for i, sym in enumerate(tickers):
-        status.caption(f"Fetching {sym}…  ({i+1}/{len(tickers)})")
-        prog.progress((i + 1) / max(len(tickers), 1))
-        _fetch_weekly_puts(sym, max_dte)
-    prog.empty(); status.empty()
+        prog = st.progress(0); status = st.empty()
+        for i, sym in enumerate(tickers):
+            status.caption(f"Fetching {sym}…  ({i+1}/{len(tickers)})")
+            prog.progress((i + 1) / max(len(tickers), 1))
+            _fetch_weekly_puts(sym, max_dte)
+        prog.empty(); status.empty()
 
-    _rsi_min = float(rsi_min_wp) if enable_rsi_wp else 0.0
-    _rsi_max = float(rsi_max_wp) if enable_rsi_wp else 100.0
+        _rsi_min = float(rsi_min_wp) if enable_rsi_wp else 0.0
+        _rsi_max = float(rsi_max_wp) if enable_rsi_wp else 100.0
 
-    df = _scan_weekly_puts(
-        tickers, max_dte, int(min_volume), int(min_oi),
-        float(moneyness), sort_by,
-        float(min_drop), require_below_ema20, require_below_sma50,
-        float(max_iv_pct), float(max_spread_pct),
-        float(delta_min), float(delta_max),
-        _rsi_min, _rsi_max, spy_chg,
-        max_premium=float(max_prem),
-    )
+        df = _scan_weekly_puts(
+            tickers, max_dte, int(min_volume), int(min_oi),
+            float(moneyness), sort_by,
+            float(min_drop), require_below_ema20, require_below_sma50,
+            float(max_iv_pct), float(max_spread_pct),
+            float(delta_min), float(delta_max),
+            _rsi_min, _rsi_max, spy_chg,
+            max_premium=float(max_prem),
+        )
 
-    st.session_state["wkly_puts_time"] = pd.Timestamp.now().strftime("%H:%M:%S")
+        # ── APPLY STRATEGY IMPROVEMENTS (0-3 DTE) ─────────────────────────────────
+        if not df.empty:
+            try:
+                if 'dte' not in df.columns:
+                    df['dte'] = max_dte
+                optimizer = StrategyOptimizer(account_size=100000)
+                df, _ = optimizer.apply_all_improvements(df)
+                st.toast("✅ Improvements applied: Earnings filter + IV rank + Position sizing")
+            except Exception as e:
+                st.toast(f"⚠️ Could not apply improvements: {e}", icon="⚠️")
+
+        st.session_state.wkly_puts_df   = df
+        st.session_state["wkly_puts_time"] = pd.Timestamp.now().strftime("%H:%M:%S")
+
+    df = st.session_state.wkly_puts_df
+
+    if df.empty and not clicked:
+        st.info("Click **▶ Scan Now** to run the scan.")
+        return
 
     # Simulate potential return if stock drops X%
     sim_drop = 5
@@ -8449,7 +9336,7 @@ def render_parabolic_short():
         r = {"pass": False, "below_vwap": False, "was_above": False,
              "vwap": None, "current": None, "pct_from_vwap": None}
         try:
-            intra = yf.Ticker(symbol).history(period="1d", interval="5m")
+            intra = yf.Ticker(symbol).history(period="1d", interval="5m").dropna(subset=["Close"])
             if intra.empty or len(intra) < 8:
                 r["note"] = "no intraday data"
                 return r
@@ -8472,7 +9359,7 @@ def render_parabolic_short():
     def _fetch_daily(symbol, months):
         try:
             t    = yf.Ticker(symbol)
-            hist = t.history(period=f"{months}mo", interval="1d")
+            hist = t.history(period=f"{months}mo", interval="1d").dropna(subset=["Close"])
             cap  = getattr(t.fast_info, "market_cap", None) or 0
             return hist, float(cap)
         except Exception:
@@ -8483,7 +9370,7 @@ def render_parabolic_short():
         r = {"pass": False, "below_vwap": False, "was_above": False,
              "vwap": None, "current": None, "pct_from_vwap": None}
         try:
-            intra = yf.Ticker(symbol).history(period="1d", interval="5m")
+            intra = yf.Ticker(symbol).history(period="1d", interval="5m").dropna(subset=["Close"])
             if intra.empty or len(intra) < 8:
                 r["note"] = "no intraday data"
                 return r
@@ -8800,7 +9687,7 @@ def _fetch_0dte_chain(symbol: str) -> tuple:
 
         above_ema20 = rsi14 = None
         try:
-            hist  = ticker.history(period="30d", auto_adjust=True)
+            hist  = ticker.history(period="30d", auto_adjust=True).dropna(subset=["Close"])
             close = hist["Close"]
             if len(close) >= 20:
                 above_ema20 = bool(price > close.ewm(span=20).mean().iloc[-1])
@@ -9139,7 +10026,7 @@ def _fetch_nearest_chain(symbol: str, max_dte: int = 3) -> tuple:
 
         above_ema20 = rsi14 = None
         try:
-            hist  = ticker.history(period="30d", auto_adjust=True)
+            hist  = ticker.history(period="30d", auto_adjust=True).dropna(subset=["Close"])
             close = hist["Close"]
             if len(close) >= 20:
                 above_ema20 = bool(price > close.ewm(span=20).mean().iloc[-1])
@@ -9276,20 +10163,25 @@ def _scan_spread_setups(
             if credit <= 0 or max_loss <= 0:
                 return None
             max_contracts = max(int((account_size * risk_pct / 100) / (max_loss * 100)), 0)
+            breakeven = round(short_K - credit, 2) if side == "put" else round(short_K + credit, 2)
             return {
                 "short_K": short_K, "long_K": float(long_row["strike"]),
                 "short_d": round(short_d, 3), "credit": credit,
                 "max_loss": max_loss, "prob_profit": round((1 - abs(short_d)) * 100, 1),
-                "max_contracts": max_contracts,
+                "max_contracts": max_contracts, "breakeven": breakeven,
             }
 
         spread = None
         spread_label = ""
         if strategy == "bull_put":
             spread = _build_spread(puts_df, "put")
+            if spread:
+                spread["breakeven_lo"], spread["breakeven_hi"] = spread["breakeven"], None
             spread_label = "Bull Put Spread 🟢"
         elif strategy == "bear_call":
             spread = _build_spread(calls_df, "call")
+            if spread:
+                spread["breakeven_lo"], spread["breakeven_hi"] = None, spread["breakeven"]
             spread_label = "Bear Call Spread 🔴"
         elif strategy == "iron_condor":
             bull = _build_spread(puts_df,  "put")
@@ -9306,6 +10198,8 @@ def _scan_spread_setups(
                         "max_loss":     ic_max_loss,
                         "prob_profit":  round(bull["prob_profit"] * bear["prob_profit"] / 100, 1),
                         "max_contracts": min(bull["max_contracts"], bear["max_contracts"]),
+                        "breakeven_lo": round(bull["short_K"] - combined_credit, 2),
+                        "breakeven_hi": round(bear["short_K"] + combined_credit, 2),
                     }
                     spread_label = "Iron Condor 🔷"
         if spread is None:
@@ -9340,6 +10234,8 @@ def _scan_spread_setups(
             "prob_profit_%": spread["prob_profit"],
             "max_contracts": spread["max_contracts"],
             "calm_score":   neutral_score,
+            "breakeven_lo": spread.get("breakeven_lo"),
+            "breakeven_hi": spread.get("breakeven_hi"),
         })
 
     if not rows:
@@ -9448,16 +10344,23 @@ def render_0dte_scanner():
         mode = st.radio(
             "**Mode**",
             ["🏆 Sell Premium  (Credit Spreads — Professional)", "⚡ Buy Directional  (Intraday Momentum)", "📅 Intraday Close  (1-3 DTE, exit today)"],
-            index=0, horizontal=False, key="dte0_mode",
+            index=1, horizontal=False, key="dte0_mode",
             help=(
-                "**Sell Premium**: Institutions sell 0DTE credit spreads and iron condors. "
-                "Time decay works FOR you. ~70-85% win rate. Lower reward per trade.\n\n"
+                "**Sell Premium**: Backtested against real Alpaca minute-bar SPY 0DTE data "
+                "and KILLED — no configuration showed a positive edge. See the warning below "
+                "before using this mode.\n\n"
                 "**Buy Directional**: Buy calls/puts on strong intraday moves. "
                 "High reward but ~40-50% win rate. MUST have a catalyst. Entry 10AM-12PM only.\n\n"
                 "**Intraday Close**: Buy 1-3 DTE options, close same day. More time buffer, "
                 "wider universe of names."
             ),
         )
+
+        if mode.startswith("🏆"):
+            st.error(backtest_badges.zero_dte_sell_premium_banner())
+        else:
+            st.caption(backtest_badges.zero_dte_directional_badge("call"))
+            st.caption(backtest_badges.zero_dte_directional_badge("put"))
 
         if mode.startswith("🏆"):
             st.markdown("**Spread strategy**")
@@ -9546,6 +10449,18 @@ def render_0dte_scanner():
                 true_tickers, strat_key, spy_chg,
                 float(target_delta), float(account_size), float(risk_pct),
             )
+
+            # ── APPLY STRATEGY IMPROVEMENTS (0DTE Spreads) ─────────────────────────
+            if not sdf.empty:
+                try:
+                    if 'dte' not in sdf.columns:
+                        sdf['dte'] = 0
+                    optimizer = StrategyOptimizer(account_size=float(account_size))
+                    sdf, _ = optimizer.apply_all_improvements(sdf)
+                    st.toast("✅ Improvements applied: Earnings filter + IV rank + Position sizing")
+                except Exception as e:
+                    st.toast(f"⚠️ Could not apply improvements: {e}", icon="⚠️")
+
             st.session_state.dte0_spread_df = sdf
             st.session_state.dte0_time = now.strftime("%H:%M:%S")
             if not sdf.empty:
@@ -9590,6 +10505,18 @@ def render_0dte_scanner():
             _nonempty_puts  = [p for p in parts_put  if not p.empty]
             call_df = pd.concat(_nonempty_calls, ignore_index=True).sort_values("score", ascending=False) if _nonempty_calls else pd.DataFrame()
             put_df  = pd.concat(_nonempty_puts,  ignore_index=True).sort_values("score", ascending=False) if _nonempty_puts  else pd.DataFrame()
+
+            # ── APPLY STRATEGY IMPROVEMENTS (0-3 DTE Directional/Intraday) ─────────
+            for df in [call_df, put_df]:
+                if not df.empty:
+                    try:
+                        if 'dte' not in df.columns:
+                            df['dte'] = 0 if not use_intraday else 3
+                        optimizer = StrategyOptimizer(account_size=100000)
+                        df, _ = optimizer.apply_all_improvements(df)
+                    except Exception as e:
+                        pass  # Silently skip if improvements fail
+
             st.session_state.dte0_df_calls = call_df
             st.session_state.dte0_df_puts  = put_df
             st.session_state.dte0_time = now.strftime("%H:%M:%S")
@@ -9684,8 +10611,25 @@ def render_0dte_scanner():
                 f"{row['strategy']}  **{row['symbol']}**  ${row['price']:.2f}  "
                 f"·  Sell {row['short_strike']} / Buy {row['long_strike']}  "
                 f"·  Credit: ${credit_contract:.0f}/contract  "
-                f"·  ProbProfit: {row['prob_profit_%']:.1f}%"
+                f"·  ProbProfit: {row['prob_profit_%']:.1f}%",
+                expanded=True,
             ):
+                lo, hi = row.get("breakeven_lo"), row.get("breakeven_hi")
+                if pd.notna(lo) and pd.notna(hi):
+                    profit_zone = f"stays **between ${lo:.2f} and ${hi:.2f}**"
+                elif pd.notna(lo):
+                    profit_zone = f"stays **above ${lo:.2f}**"
+                elif pd.notna(hi):
+                    profit_zone = f"stays **below ${hi:.2f}**"
+                else:
+                    profit_zone = "stays in the target range"
+                st.markdown(
+                    f"**What this means:** you collect **${credit_contract:.0f}** upfront per contract "
+                    f"by selling {row['short_strike']} and buying {row['long_strike']} as protection. "
+                    f"You keep the full ${credit_contract:.0f} if **{row['symbol']}** {profit_zone} "
+                    f"at today's close. Max you can lose is **${loss_contract:.0f}**/contract if it "
+                    f"closes beyond the protection strike ({row['long_strike']})."
+                )
                 dc1, dc2, dc3, dc4 = st.columns(4)
                 dc1.metric("Credit collected",  f"${credit_contract:.0f}/contract")
                 dc2.metric("Max loss",          f"${loss_contract:.0f}/contract")
@@ -9825,10 +10769,11 @@ def render_cheap_calls():
     clicked = _page_header(
         "💰", "Cheap Calls  (<$1.50 premium)",
         "Finds calls under $1.50/share ($150/contract) expiring within 7 calendar days of purchase. "
-        "Backtest-optimized defaults: DTE≤7, RSI 55–70, delta 0.05–0.45. "
+        "Defaults: DTE≤7, RSI 55–70, delta 0.05–0.45. "
         "Sorted by GO Score — highest upside conviction first.",
         scan_key="cheap_calls_scan_btn", last_key="cheap_calls_time",
     )
+    st.caption(backtest_badges.cheap_calls_badge())
 
     # ── Universe selector + Settings ─────────────────────────────────────────
     with st.expander("⚙️ Settings", expanded=True):
@@ -9841,12 +10786,16 @@ def render_cheap_calls():
         )
 
         st.markdown("**Premium & expiry**")
-        p1, p2, p3 = st.columns(3)
-        max_prem  = p1.slider("Max premium ($/share)", 0.05, 5.00, 1.50, step=0.05,
+        p1, p2, p3, p4 = st.columns(4)
+        min_prem  = p1.slider("Min premium ($/share)", 0.20, 2.00, 0.30, step=0.05,
+                              key="cc_min_prem",
+                              help="Floor removes <$0.30 lottery tickets (>90% expire worthless)")
+        max_prem  = p2.slider("Max premium ($/share)", 0.50, 5.00, 1.50, step=0.05,
                               key="cc_max_prem",
                               help="$1.50/share = $150 per contract")
-        max_dte   = p2.slider("Max DTE", 0, 14, 7, key="cc_max_dte")
-        min_vol   = p3.number_input("Min call volume", 0, 50_000, 50, step=25, key="cc_min_vol")
+        max_dte   = p3.slider("Max DTE", 1, 14, 7, key="cc_max_dte",
+                              help="Min 1 avoids 0DTE lottery tickets")
+        min_vol   = p4.number_input("Min call volume", 0, 50_000, 100, step=25, key="cc_min_vol")
 
         st.markdown("**Stock filters**")
         s1, s2, s3 = st.columns(3)
@@ -9983,9 +10932,23 @@ def render_cheap_calls():
             rsi_max     = _cc_rsi_max,
             spy_chg     = spy_chg,
             max_premium = float(max_prem),
+            min_premium = float(min_prem),
             min_vol_ratio = float(cc_vol_surge),
             min_rel_str   = -999.0,   # rel_str filter doesn't improve WR — keep off
         )
+
+        # ── APPLY STRATEGY IMPROVEMENTS (0-7 DTE) ─────────────────────────────────
+        if not df.empty:
+            try:
+                # Add DTE column if not present
+                if 'dte' not in df.columns:
+                    df['dte'] = max_dte
+
+                optimizer = StrategyOptimizer(account_size=100000)
+                df, _ = optimizer.apply_all_improvements(df)
+                st.toast("✅ Improvements applied: Earnings filter + IV rank + Position sizing")
+            except Exception as e:
+                st.toast(f"⚠️ Could not apply improvements: {e}", icon="⚠️")
 
         ts = pd.Timestamp.now()
         st.session_state.cc_df = df
@@ -10199,9 +11162,69 @@ With our backtested params (49% WR, 4.8× profit factor):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Unified Options Scanner — one nav item, mode switcher dispatching to the
+# existing, unchanged, individually-tuned scan implementations below.
+# Consolidates: Weekly Options (0-7D calls) · Cheap Calls (same scan, cheap/
+# deep-OTM preset) · Weekly Puts (0-3D puts, own implementation) · 0DTE
+# (same-day, own implementation). The underlying scanners stay untouched —
+# each has its own backtested defaults — this just removes 4 nav items in
+# favor of 1 with a mode picker, per user request to reduce duplicate items.
+# ═════════════════════════════════════════════════════════════════════════════
+
+_OPTIONS_MODES = {
+    # PROFITABLE ONLY: 50%+ win rate strategies
+    "💰 Cheap Calls (<$150)":        ("cheap_calls",  render_cheap_calls),
+    "🎰 Swing Options (45-60 DTE)":  ("swing_opts",   render_swing_options),
+}
+# Backward compatibility: map old IDs to current modes
+_OPTIONS_MODE_BY_LEGACY_ID = {
+    "cheap_calls": "💰 Cheap Calls (<$150)",
+    "swing_opts": "🎰 Swing Options (45-60 DTE)",
+    "weekly_opts": "💰 Cheap Calls (<$150)",   # Redirect old bookmarks to Cheap Calls
+    "weekly_puts": "🎰 Swing Options (45-60 DTE)",  # Redirect to Swing Options
+    "zero_dte": "💰 Cheap Calls (<$150)",     # Redirect to Cheap Calls
+}
+
+
+def render_options_hub():
+    """Unified options scanner hub: 2 profitable strategies only (50%+ win rate)."""
+    # Old bookmarked ?scanner=weekly_opts / cheap_calls / etc. still work for valid modes
+    default_mode = _OPTIONS_MODE_BY_LEGACY_ID.get(
+        st.session_state.get("_options_incoming_legacy_id", ""),
+        "💰 Cheap Calls (<$150)",  # Default to first profitable strategy
+    )
+
+    # Initialize or reset if mode not in current available modes
+    if "options_hub_mode" not in st.session_state or st.session_state.options_hub_mode not in _OPTIONS_MODES:
+        st.session_state.options_hub_mode = default_mode
+
+    # Display validation status for all modes
+    backtest_badges.render_options_hub_validation()
+
+    st.markdown("---")
+    mode = st.radio(
+        "DTE Range", list(_OPTIONS_MODES.keys()),
+        key="options_hub_mode", horizontal=True, label_visibility="collapsed",
+    )
+    st.divider()
+    _OPTIONS_MODES[mode][1]()
+
+
+# Backward compatibility alias for existing code
+def render_options_unified():
+    """Deprecated: Use render_options_hub() instead."""
+    render_options_hub()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Scanner Registry
 # To add a new scanner: append one entry here, then write a render_*() function.
 # ═════════════════════════════════════════════════════════════════════════════
+
+def render_stock_analyzer():
+    from stock_analyzer_module import render_stock_analyzer as _render
+    _render()
+
 
 SCANNERS = [
     {"id": "home",         "label": "🏠  Home",               "category": "home",    "render": render_home},
@@ -10219,11 +11242,7 @@ SCANNERS = [
     {"id": "macd",           "label": "〽️  MACD Scanner",        "category": "technical", "render": render_macd},
     {"id": "gap",            "label": "🕳️  Gap Scanner",          "category": "technical", "render": render_gap},
     {"id": "volume",         "label": "🔊  Volume Surge",        "category": "technical", "render": render_volume},
-    {"id": "zero_dte",       "label": "🔥  0DTE Scanner",            "category": "options", "render": render_0dte_scanner},
-    {"id": "weekly_opts",    "label": "⚡  Weekly Options (0-7 DTE)", "category": "options", "render": render_weekly_options},
-    {"id": "cheap_calls",   "label": "💰  Cheap Calls (<$150)",      "category": "options", "render": render_cheap_calls},
-    {"id": "weekly_puts",   "label": "📉  Weekly Puts (0-3 DTE)",    "category": "options", "render": render_weekly_puts},
-    {"id": "swing_opts",     "label": "🎰  Options 45-60 DTE",  "category": "options",   "render": render_swing_options},
+    {"id": "options_hub",    "label": "⚡  Options Scanner",     "category": "options",   "render": render_options_hub},
     {"id": "opt_paper",      "label": "🟢  Options Paper Trade", "category": "options",   "render": render_options_paper_trade},
     {"id": "opt_log",        "label": "📋  Options Trade Log",   "category": "options",   "render": render_options_log},
     {"id": "opt_backtest",   "label": "🔬  Options Backtest",    "category": "options",   "render": render_options_backtest},
@@ -10237,14 +11256,14 @@ SCANNERS = [
 ]
 
 SCANNER_GROUPS = [
-    {"id": "home",      "label": "HOME",         "icon": "🏠"},
-    {"id": "analyze",   "label": "ANALYZE",     "icon": "🔍"},
-    {"id": "trades",    "label": "FIND TRADES",  "icon": "🎯"},
-    {"id": "technical", "label": "TECHNICAL",   "icon": "⚡"},
-    {"id": "options",   "label": "OPTIONS",     "icon": "🎰"},
-    {"id": "automate",  "label": "AUTOMATE",    "icon": "🤖"},
-    {"id": "macro",     "label": "MACRO",       "icon": "🌍"},
-    {"id": "more",      "label": "MORE",        "icon": "⋯"},
+    {"id": "home",      "label": "HOME",          "icon": "🏠"},
+    {"id": "analyze",   "label": "ANALYZE",       "icon": "🔍"},
+    {"id": "trades",    "label": "TRADE SETUPS",  "icon": "🎯"},
+    {"id": "technical", "label": "TECHNICAL",     "icon": "📊"},
+    {"id": "options",   "label": "OPTIONS",       "icon": "🎰"},
+    {"id": "automate",  "label": "AUTOMATE",      "icon": "🤖"},
+    {"id": "macro",     "label": "MACRO",         "icon": "🌍"},
+    {"id": "more",      "label": "MORE",          "icon": "⋯"},
 ]
 SCANNERS_BY_ID = {s["id"]: s for s in SCANNERS}
 
@@ -10253,54 +11272,91 @@ SCANNERS_BY_ID = {s["id"]: s for s in SCANNERS}
 # Sidebar
 # ═════════════════════════════════════════════════════════════════════════════
 
-# Initialize active scanner — honour ?scanner=<id> URL param on first load
-if "active_scanner_id" not in st.session_state:
-    _url_scanner = st.query_params.get("scanner", "home")
-    st.session_state["active_scanner_id"] = (
-        _url_scanner if _url_scanner in SCANNERS_BY_ID else "home"
-    )
+# Always sync active scanner from URL param (enables link-based navigation and
+# new-tab opens). Fall back to session state if no URL param is present.
+_url_scanner = st.query_params.get("scanner", "")
+# Old bookmarks/links to the pre-consolidation options pages (weekly_opts,
+# cheap_calls, weekly_puts, zero_dte, swing_opts) still resolve — to the hub,
+# defaulting to the matching mode — instead of silently falling back to Home.
+if _url_scanner in _OPTIONS_MODE_BY_LEGACY_ID:
+    st.session_state["_options_incoming_legacy_id"] = _url_scanner
+    if "options_hub_mode" not in st.session_state or st.query_params.get("scanner") != st.session_state.get("_last_url_scanner"):
+        st.session_state["options_hub_mode"] = _OPTIONS_MODE_BY_LEGACY_ID[_url_scanner]
+    st.session_state["_last_url_scanner"] = _url_scanner
+    _url_scanner = "options_hub"
+
+if _url_scanner and _url_scanner in SCANNERS_BY_ID:
+    st.session_state["active_scanner_id"] = _url_scanner
+elif "active_scanner_id" not in st.session_state:
+    st.session_state["active_scanner_id"] = "home"
 
 with st.sidebar:
+    # ── Logo + market status ───────────────────────────────────────────────────
     st.markdown(
-        f"<div style='font-size:1.4rem;font-weight:700;margin-bottom:4px;color:#e2e8f0'>📈 Swing Dashboard</div>"
-        f"<div style='margin-bottom:20px'>{market_badge_html()}</div>",
+        f"<div style='font-size:1.35rem;font-weight:800;color:{T['logo_color']};margin-bottom:2px;letter-spacing:-0.3px'>📈 Swing Dashboard</div>"
+        f"<div style='margin-bottom:8px'>{market_badge_html()}</div>",
         unsafe_allow_html=True,
     )
 
+    # ── Regime strip — single source of truth, cached, shown on every page ─────
+    _regime_html = regime_strip_html()
+    if _regime_html:
+        st.markdown(_regime_html, unsafe_allow_html=True)
+
     active_id = st.session_state["active_scanner_id"]
+
+    # ── Search ────────────────────────────────────────────────────────────────
+    nav_search = st.text_input(
+        "search", placeholder="🔍  Search pages…",
+        key="sidebar_search", label_visibility="collapsed",
+    )
+    search_q = nav_search.strip().lower()
+
+    first_group = True
 
     for group in SCANNER_GROUPS:
         group_scanners = [s for s in SCANNERS if s["category"] == group["id"]]
         if not group_scanners:
             continue
 
+        # Filter by search
+        if search_q:
+            group_scanners = [s for s in group_scanners
+                              if search_q in s["label"].lower() or search_q in s["id"].lower()]
+            if not group_scanners:
+                continue
+
+        hdr_class = "nav-group-hdr-first" if first_group else ""
+        first_group = False
         st.markdown(
-            f"<div class='nav-group-hdr'>{group['label']}</div>",
+            f"<div class='nav-group-hdr {hdr_class}'>{group['icon']} {group['label']}</div>",
             unsafe_allow_html=True,
         )
+
         for scanner in group_scanners:
             is_active = (active_id == scanner["id"])
-            nav_cols = st.columns([5, 1])
-            with nav_cols[0]:
-                if is_active:
-                    st.markdown('<span class="nav-active-marker"></span>', unsafe_allow_html=True)
-                if st.button(scanner["label"], key=f"nav_{scanner['id']}", use_container_width=True):
-                    st.session_state["active_scanner_id"] = scanner["id"]
-                    st.query_params["scanner"] = scanner["id"]
-                    st.rerun()
-            with nav_cols[1]:
-                # Open this scanner in a new browser tab
-                scanner_url = f"http://localhost:8501/?scanner={scanner['id']}"
-                st.link_button("↗", scanner_url, use_container_width=True,
-                               help=f"Open {scanner['label'].strip()} in new tab")
+            if is_active:
+                st.markdown(
+                    f"<div class='nav-active-item'>{scanner['label']}</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                # Anchor link: left-click navigates within same session (no state loss),
+                # right-click / Ctrl+Click opens in a new tab.
+                st.markdown(
+                    f"<a href='?scanner={scanner['id']}' class='nav-link'>{scanner['label']}</a>",
+                    unsafe_allow_html=True,
+                )
 
-    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+    # ── Footer settings ───────────────────────────────────────────────────────
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
     st.divider()
+    st.toggle("🌙 Dark mode", key="dark_mode",
+              help="Switch between dark and light theme.")
     st.toggle("Russell 1000", value=False, key="use_russell1000",
               help="Adds ~400 extra mid-caps. Scans take 2-3× longer.")
-    st.divider()
     auto_refresh = st.checkbox("Auto-refresh (15 min)", value=False, key="auto_refresh")
-    st.caption(f"Updated: {datetime.now().strftime('%H:%M:%S')}")
+    st.caption(f"v2.0  ·  {datetime.now().strftime('%H:%M')}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
