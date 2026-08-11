@@ -1,12 +1,19 @@
 """
-Main Trading Dashboard — http://localhost:8501/
+Unified Trading Dashboard — http://localhost:8501/
 Run: streamlit run home.py --server.port 8501
 
-Sections
+Unified dashboard with two modes:
+
+MORNING BRIEFING (Quick Daily View)
   • 5 Day Trade Recommendations (gap + momentum signals, today's freshest setups)
   • 5 Breakout Stocks (NR7, BO-52W, BB-squeeze, MA-reclaim, inside-bar)
   • 5 Options Recommendations (45-60 DTE swing options, best greek profile)
   • Today's Earnings & Major Events
+
+FULL DASHBOARD (All Scanners)
+  • All trading scanners (Livermore, EMA, Breakout, Minervini, etc.)
+  • Detailed analysis and research tools
+  • Interactive scanner interface
 
 Auto-refresh
   • Before market open: page reruns every 60 s until 9:30 AM ET
@@ -407,22 +414,34 @@ SCAN_UNIVERSE = _dedup(WATCHLIST_TICKERS)
 
 def _sidebar():
     with st.sidebar:
+        # View mode selector
+        st.markdown("### 📊 Dashboard Mode")
+        view_mode = st.radio(
+            "Select view:",
+            ["🌅 Morning Briefing", "📈 Full Dashboard"],
+            horizontal=False,
+            label_visibility="collapsed"
+        )
+        st.session_state["view_mode"] = view_mode
+
+        st.markdown("---")
         st.markdown("### Navigation")
-        st.page_link("home.py",      label="Morning Briefing",  icon="🌅")
-        st.markdown("---")
-        st.markdown("**Full Dashboard** → [localhost:8502](http://localhost:8502)")
-        st.markdown("---")
-        st.markdown("**Scanners (Full Dashboard)**")
-        st.markdown("- [Livermore Pivotal](http://localhost:8502/?scanner=livermore)")
-        st.markdown("- [Combined Strategy](http://localhost:8502/?scanner=combined)")
-        st.markdown("- [Breakouts](http://localhost:8502/?scanner=breakout)")
-        st.markdown("- [Minervini SEPA](http://localhost:8502/?scanner=minervini)")
-        st.markdown("- [EMA Crossover](http://localhost:8502/?scanner=ema)")
-        st.markdown("- [Options 45-60 DTE](http://localhost:8502/?scanner=swing_opts)")
-        st.markdown("- [RSI Scanner](http://localhost:8502/?scanner=rsi)")
-        st.markdown("- [MACD Scanner](http://localhost:8502/?scanner=macd)")
-        st.markdown("- [Astro / Vedic](http://localhost:8501/?scanner=astro)")
-        st.markdown("- [📡 Influencer Tracker](http://localhost:8501/?scanner=influencers)")
+
+        if "Morning Briefing" in view_mode:
+            st.markdown("**Quick daily briefing with today's top setups**")
+        else:
+            st.markdown("**Scanners (All Strategies)**")
+            st.markdown("- 🏛️ Livermore Pivotal")
+            st.markdown("- 🔄 Combined Strategy")
+            st.markdown("- 🚀 Breakouts")
+            st.markdown("- 📐 Minervini SEPA")
+            st.markdown("- ➡️ EMA Crossover")
+            st.markdown("- ⚡ Options 45-60 DTE")
+            st.markdown("- 📊 RSI Scanner")
+            st.markdown("- 〰️ MACD Scanner")
+            st.markdown("- 🔭 Astro / Vedic")
+            st.markdown("- 📡 Influencer Tracker")
+
         st.markdown("---")
         if st.button("↺ Refresh All", use_container_width=True):
             st.cache_data.clear()
@@ -734,6 +753,10 @@ def _handle_autorefresh():
 
 def main():
     _sidebar()
+
+    # Get view mode from session state
+    view_mode = st.session_state.get("view_mode", "🌅 Morning Briefing")
+
     now = _now_et()
     market_open = _is_market_open()
     dot = '<span class="dot-open"></span>' if market_open else '<span class="dot-closed"></span>'
@@ -742,11 +765,12 @@ def main():
     date_str = now.strftime("%A, %b %d %Y")
 
     # ── Breadcrumb Navigation ──────────────────────────────────────────────────
-    st.markdown("""
+    breadcrumb_text = "Morning Briefing" if "Morning" in view_mode else "Full Dashboard"
+    st.markdown(f"""
     <div class="breadcrumb">
       <span style="color: #f5f7fa; font-weight: 500;">📊 Home</span>
       <span class="breadcrumb-sep">›</span>
-      <span style="color: #cbd5e1;">Morning Briefing</span>
+      <span style="color: #cbd5e1;">{breadcrumb_text}</span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -765,45 +789,88 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Page Header ────────────────────────────────────────────────────────────
-    st.markdown("""
-    <div class="page-header">
-      <h1 class="page-title">📈 Morning Briefing</h1>
-      <p class="page-subtitle">Today's trading setups, breakouts, and market events</p>
-    </div>
-    """, unsafe_allow_html=True)
+    # Show content based on view mode
+    if "Morning" in view_mode:
+        # ── MORNING BRIEFING VIEW ──────────────────────────────────────────────
+        st.markdown("""
+        <div class="page-header">
+          <h1 class="page-title">📈 Morning Briefing</h1>
+          <p class="page-subtitle">Today's trading setups, breakouts, and market events</p>
+        </div>
+        """, unsafe_allow_html=True)
 
-    # ── Scan info and controls ─────────────────────────────────────────────────
-    n = len(SCAN_UNIVERSE)
-    hcol1, hcol2, hcol3 = st.columns([3, 1, 1])
-    with hcol1:
-        st.markdown(
-            f'<p class="page-meta">Scanning **{n}** tickers · Cache: 5 min (market hours) / 1 hr (pre-post) · Auto-refresh enabled</p>',
-            unsafe_allow_html=True
-        )
-    with hcol2:
-        st.link_button("📊 Full Dashboard", "http://localhost:8502", use_container_width=True)
-    with hcol3:
-        if st.button("↺ Refresh Now", use_container_width=True, key="refresh_btn"):
-            st.cache_data.clear()
-            st.rerun()
+        # ── Scan info and controls ───────────────────────────────────────────
+        n = len(SCAN_UNIVERSE)
+        hcol1, hcol2, hcol3 = st.columns([3, 1, 1])
+        with hcol1:
+            st.markdown(
+                f'<p class="page-meta">Scanning **{n}** tickers · Cache: 5 min (market hours) / 1 hr (pre-post) · Auto-refresh enabled</p>',
+                unsafe_allow_html=True
+            )
+        with hcol2:
+            st.write("")
+        with hcol3:
+            if st.button("↺ Refresh Now", use_container_width=True, key="refresh_btn"):
+                st.cache_data.clear()
+                st.rerun()
 
-    # ── Row 1: Day Trades | Breakout Stocks ───────────────────────────────────
-    col1, col2 = st.columns(2)
-    with col1:
-        _render_day_trades()
-    with col2:
-        _render_breakouts()
+        # ── Row 1: Day Trades | Breakout Stocks ────────────────────────────
+        col1, col2 = st.columns(2)
+        with col1:
+            _render_day_trades()
+        with col2:
+            _render_breakouts()
 
-    # ── Row 2: Options | Today's Events ───────────────────────────────────────
-    col3, col4 = st.columns([3, 2])
-    with col3:
-        _render_options()
-    with col4:
-        _render_events()
+        # ── Row 2: Options | Today's Events ────────────────────────────────
+        col3, col4 = st.columns([3, 2])
+        with col3:
+            _render_options()
+        with col4:
+            _render_events()
 
-    # ── Auto-refresh before market open ───────────────────────────────────────
-    _handle_autorefresh()
+        # ── Auto-refresh before market open ────────────────────────────────
+        _handle_autorefresh()
+
+    else:
+        # ── FULL DASHBOARD VIEW ────────────────────────────────────────────
+        st.markdown("""
+        <div class="page-header">
+          <h1 class="page-title">📊 Full Dashboard</h1>
+          <p class="page-subtitle">All trading scanners and analysis tools</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.info("""
+        ### 🚀 Full Dashboard Features Available:
+
+        **Strategy Scanners:**
+        - 🏛️ Livermore Pivotal Points
+        - 🎯 Combined Strategy
+        - 🚀 Breakout Detection
+        - 📐 Minervini SEPA
+        - ➡️ EMA Crossover
+        - 📊 RSI Scanner
+        - 〰️ MACD Scanner
+
+        **Specialized Tools:**
+        - ⚡ Options 45-60 DTE
+        - 🔭 Financial Astrology
+        - 📡 Influencer Tracker
+        - 🔔 Daily Alerts Engine
+        - 📈 Stock Analyzer
+        - 📅 Macro Calendar
+
+        Use the sidebar to select any scanner to dive deep into specific analysis.
+        """, icon="📊")
+
+        st.markdown("---")
+        st.markdown("""
+        <div style="text-align: center; padding: 2rem;">
+            <p style="color: #94a3b8; font-size: 14px;">
+                💡 Tip: Select a scanner from the sidebar to begin detailed analysis
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
