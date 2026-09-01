@@ -908,6 +908,8 @@ def _premium_impl(symbol: str, dte_target: int = 35, short_delta: float = 0.20) 
     T = max(dte, 1) / 365.0
     rv20 = _realized_vol(hist, 20)
     rv60 = _realized_vol(hist, 60)
+    if rv20 and atm < 0.55 * rv20:
+        return {"symbol": symbol, "skip": f"IV feed stale ({atm*100:.0f}% vs realized {rv20*100:.0f}%)"}
     iv_rv = atm / rv20 if rv20 else float("nan")
 
     closes = hist["Close"]
