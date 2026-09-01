@@ -81,6 +81,10 @@ def bs_price(S, K, T, iv, is_call, r=0.045):
 # --------------------------------------------------------------------------- #
 @st.cache_data(ttl=3600, show_spinner=False)
 def _load_ticker(symbol: str):
+    return _load_ticker_impl(symbol)
+
+
+def _load_ticker_impl(symbol: str):
     tk = yf.Ticker(symbol)
     hist = _retry(lambda: tk.history(period="1y", auto_adjust=False), label=f"{symbol} history")
     if hist is None or hist.empty:
@@ -127,6 +131,10 @@ def _load_ticker(symbol: str):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _chain(symbol: str, expiry: str):
+    return _chain_impl(symbol, expiry)
+
+
+def _chain_impl(symbol: str, expiry: str):
     ch = _retry(lambda: yf.Ticker(symbol).option_chain(expiry), label=f"{symbol} {expiry} chain")
     return ch.calls, ch.puts
 
@@ -354,13 +362,16 @@ def _payoff_fig(strat, spot, lo, hi, dark=False):
 # --------------------------------------------------------------------------- #
 # Core analysis — pure, cached, no st.* output.  Shared by single view + scanner.
 # --------------------------------------------------------------------------- #
-def _analyze_impl(symbol: str) -> dict:
+def _analyze_impl(symbol: str, live: bool = False) -> dict:
     """Full IV-crush read for one ticker. Returns a dict with either
     {"error": "..."} or all computed fields + verdict + strat.
-    Pure (no st.*) so the nightly prefetch CLI can call it directly."""
+    Pure (no st.*) so the nightly prefetch CLI can call it directly.
+    live=True bypasses the 1h data cache for an on-demand re-check."""
+    _lt = _load_ticker_impl if live else _load_ticker
+    _ch = _chain_impl if live else _chain
     symbol = symbol.strip().upper()
     try:
-        data = _load_ticker(symbol)
+        data = _lt(symbol)
     except Exception as e:
         return {"symbol": symbol, "error": str(e)}
 
@@ -382,8 +393,8 @@ def _analyze_impl(symbol: str) -> dict:
     back_exp = back_cand[0] if back_cand else expiries[-1]
 
     try:
-        fc, fp = _chain(symbol, front_exp)
-        bc, bp = _chain(symbol, back_exp)
+        fc, fp = _ch(symbol, front_exp)
+        bc, bp = _ch(symbol, back_exp)
     except Exception as e:
         return {"symbol": symbol, "error": f"chain load failed: {e}"}
 
@@ -545,6 +556,66 @@ def analyze_ticker(symbol: str) -> dict:
 def _fin(x) -> bool:
     """True if x is a finite real number. Robust to None (JSON-cleaned nan/inf)."""
     return isinstance(x, (int, float)) and math.isfinite(x)
+
+
+def _live_recheck(sym: str, kind: str, cached: dict):
+    """Button inside a ticket: pull this name's chain NOW (bypass the daily
+    cache), re-run the model, show what changed and whether it still qualifies."""
+    dark = st.session_state.get("dark_mode", False)
+    key = f"live_{kind}_{sym}"
+    if st.button(f"🔄 Live price & re-check", key=key,
+                 help="Ignores the overnight cache — fetches this option chain right "
+                      "now and re-scores it."):
+        with st.spinner(f"Pulling {sym}'s chain live…"):
+            st.session_state[key + "_res"] = (
+                _analyze_impl(sym, live=True) if kind == "earnings"
+                else _premium_impl(sym, live=True))
+    fresh = st.session_state.get(key + "_res")
+    if not fresh:
+        return
+    if fresh.get("error") or fresh.get("skip"):
+        st.warning(f"Live re-check failed: {fresh.get('error') or fresh.get('skip')}")
+        return
+
+    fs = fresh.get("strat")
+    st.markdown("---")
+    st.markdown("**🔴 LIVE** — as of now:")
+
+    if kind == "earnings":
+        still = ("SELL" in fresh["verdict"]) or ("BUY" in fresh["verdict"])
+        old_c = (cached.get("strat") or {}).get("net")
+        new_c = (fs or {}).get("net")
+        cols = st.columns(3)
+        cols[0].metric("Verdict now", fresh["verdict"].split("—")[0].strip(),
+                       help=fresh["verdict"])
+        if _fin(old_c) and _fin(new_c):
+            cols[1].metric("Credit", f"${new_c:.2f}", f"{new_c-old_c:+.2f} vs cache")
+        cols[2].metric("Score", f"{fresh['score']:+.0f}",
+                       f"{fresh['score']-cached.get('score',0):+.0f}")
+    else:
+        still = bool(fresh.get("ok"))
+        cols = st.columns(3)
+        cols[0].metric("Rated now", "GOOD" if still else "marginal")
+        if _fin((cached.get("credit"))) and _fin(fresh.get("credit")):
+            cols[1].metric("Credit", f"${fresh['credit']:.2f}",
+                           f"{fresh['credit']-cached['credit']:+.2f} vs cache")
+        if _fin(fresh.get("pop")):
+            cols[2].metric("PoP now", f"{fresh['pop']*100:.0f}%")
+
+    (st.success if still else st.error)(
+        "✅ Still qualifies" if still else "✗ No longer qualifies — the edge moved since the overnight scan")
+
+    if fs:
+        _md(f"**{fs['name']}** · expiry `{fresh.get('front_exp') or fresh.get('exp')}`")
+        _render_legs(fs)
+        _md(f"**Net {fs['net_kind']}:** ${fs['net']:.2f}  ·  "
+            f"**Max loss:** " + (f"${fs['max_loss']*100:.0f}/lot" if _fin(fs.get("max_loss")) else "—")
+            + "  ·  **BE:** " + ", ".join(f"${b:.2f}" for b in fs["breakevens"]))
+        rng = max((fresh.get("straddle_pct", 8)) / 100 * fresh["spot"] * 2.2, fresh["spot"] * 0.12)
+        st.plotly_chart(_payoff_fig(fs, fresh["spot"], fresh["spot"] - rng, fresh["spot"] + rng, dark),
+                        use_container_width=True, key=f"lpf_{kind}_{sym}")
+    for reason in fresh.get("reasons", []):
+        st.caption("• " + str(reason))
 
 
 def _render_legs(strat: dict):
@@ -841,8 +912,12 @@ def _render_scanner():
             for reason in r["reasons"]:
                 st.markdown("- " + str(reason).replace("$", "\\$"))
             st.write(f"• 10-day trend {r['ret10']:+.1f}% → lean {r['lean']}")
+            st.caption(f"cached from the {pd.Timestamp(meta['built_at']).strftime('%b %d %H:%M')} scan"
+                       if meta else "cached scan")
+            _live_recheck(sym, "earnings", r)
             if strat is None:
-                st.info("No structure — wait for a better setup."); continue
+                st.info("No structure in the cached scan — use **Live price & re-check** above to "
+                        "see if it qualifies now."); continue
             risk_budget, loss_per_lot, lots = _sizing(strat, account, risk_pct)
             cL, cR = st.columns([1, 1])
             with cL:
@@ -925,12 +1000,16 @@ CREDIBLE_TICKERS = [
 ]
 
 
-def _premium_impl(symbol: str, dte_target: int = 35, short_delta: float = 0.20) -> dict:
+def _premium_impl(symbol: str, dte_target: int = 35, short_delta: float = 0.20,
+                  live: bool = False) -> dict:
     """One high-prob credit-spread idea on a name with NO earnings in the window.
-    Pure (no st.*). Returns {"error"/"skip": ...} or a full idea dict."""
+    Pure (no st.*). Returns {"error"/"skip": ...} or a full idea dict.
+    live=True bypasses the 1h data cache for an on-demand re-check."""
+    _lt = _load_ticker_impl if live else _load_ticker
+    _ch = _chain_impl if live else _chain
     symbol = symbol.strip().upper()
     try:
-        data = _load_ticker(symbol)
+        data = _lt(symbol)
     except Exception as e:
         return {"symbol": symbol, "error": str(e)}
 
@@ -956,7 +1035,7 @@ def _premium_impl(symbol: str, dte_target: int = 35, short_delta: float = 0.20) 
         return {"symbol": symbol, "skip": f"earnings {next_earn.date()} inside window"}
 
     try:
-        calls, puts = _chain(symbol, exp)
+        calls, puts = _ch(symbol, exp)
     except Exception as e:
         return {"symbol": symbol, "error": f"chain: {e}"}
     atm, det = _atm_iv(calls, puts, spot)
@@ -1134,6 +1213,9 @@ def _render_premium():
         with st.expander(f"{sym} · {r['style']} · {r['verdict']}"):
             for reason in r["reasons"]:
                 st.markdown("- " + str(reason).replace("$", "\\$"))
+            st.caption(f"cached from the {pd.Timestamp(meta['built_at']).strftime('%b %d %H:%M')} scan"
+                       if meta else "cached scan")
+            _live_recheck(sym, "premium", r)
             risk_budget, loss_per_lot, lots = _sizing(s, account, risk_pct)
             cL, cR = st.columns(2)
             with cL:
