@@ -226,24 +226,56 @@ def _nearest(df, target):
     return float(s[np.abs(s - target).argmin()])
 
 
-def _mid(df, K, spot, iv, T, is_call):
+def _quote(df, K, spot, iv, T, is_call):
+    """Best price estimate for strike K + a liquidity read.
+    Returns (price, source, liquid) where source ∈ {'quote','last','model'} and
+    `liquid` means there's a real two-sided market you could actually fill:
+    both bid & ask present, spread not insane, and some open interest."""
+    theo = bs_price(spot, K, T, iv, is_call)
     row = df[df["strike"] == K]
-    if not row.empty:
-        r = row.iloc[0]
-        b, a = float(r.get("bid", 0) or 0), float(r.get("ask", 0) or 0)
-        if b > 0 and a > 0:
-            return (b + a) / 2.0
-        lp = float(r.get("lastPrice", 0) or 0)
-        if lp > 0:
-            return lp
-    return bs_price(spot, K, T, iv, is_call)
+    if row.empty:
+        return theo, "model", False
+    r = row.iloc[0]
+    def _f(x):
+        try:
+            x = float(x)
+            return x if math.isfinite(x) else 0.0
+        except Exception:
+            return 0.0
+    b, a, lp = _f(r.get("bid")), _f(r.get("ask")), _f(r.get("lastPrice"))
+    oi = _f(r.get("openInterest"))
+    if b > 0 and a > 0:
+        mid = (b + a) / 2.0
+        spread_ok = (a - b) <= max(0.15, 0.6 * mid)      # not a 3x-wide market
+        return mid, "quote", (spread_ok and oi >= 5)
+    # no two-sided market → not fillable at a known price; anchor to the model,
+    # nudged toward lastPrice only if it's in a sane band around theo
+    if lp > 0 and 0.3 * theo <= lp <= 3 * theo:
+        return (lp + theo) / 2.0, "last", False
+    return theo, "model", False
 
 
-def _leg(action: str, K: float, right: str, px: float) -> dict:
-    """One option leg. `legs[i]` string stays parseable ('SELL 98P'); price rides
-    alongside so the ticket can show it."""
-    return {"action": action, "strike": float(K), "right": right, "px": round(float(px), 2),
-            "label": f"{action} {K:g}{right}"}
+def _mid(df, K, spot, iv, T, is_call):
+    return _quote(df, K, spot, iv, T, is_call)[0]
+
+
+def _qleg(action, df, K, right, spot, iv, T):
+    px, src, liq = _quote(df, K, spot, iv, T, right == "C")
+    return {"action": action, "strike": float(K), "right": right, "px": round(px, 2),
+            "src": src, "liquid": bool(liq), "label": f"{action} {K:g}{right}"}
+
+
+def _finish(name, legs, kind, max_loss, breakevens, pop):
+    net = abs(sum((l["px"] if l["action"] == "SELL" else -l["px"]) for l in legs))
+    # thin = a leg we'd SELL has no real fillable market (the credit is fiction),
+    # or, for a debit, a leg we'd BUY is model-only.
+    short_thin = any(l["action"] == "SELL" and not l["liquid"] for l in legs)
+    modelled = any(l["src"] == "model" for l in legs)
+    thin = short_thin or (kind == "debit" and modelled)
+    return {"name": name, "legs": [l["label"] for l in legs], "leg_detail": legs,
+            "net": net, "net_kind": kind,
+            "max_profit": (net if kind == "credit" else max_loss),
+            "max_loss": max_loss, "breakevens": breakevens, "pop": pop, "thin": thin}
 
 
 def _iron_condor(calls, puts, spot, ivc, ivp, T, short_delta=0.16):
@@ -253,17 +285,13 @@ def _iron_condor(calls, puts, spot, ivc, ivp, T, short_delta=0.16):
         return None
     width = max(round((sc - sp) * 0.25, 0), _step(calls))
     lc, lp = _nearest(calls, sc + width), _nearest(puts, sp - width)
-    m_sp = _mid(puts, sp, spot, ivp, T, False); m_lp = _mid(puts, lp, spot, ivp, T, False)
-    m_sc = _mid(calls, sc, spot, ivc, T, True); m_lc = _mid(calls, lc, spot, ivc, T, True)
-    credit = (m_sc - m_lc) + (m_sp - m_lp)
-    max_loss = max(lc - sc, sp - lp) - credit
+    legs = [_qleg("SELL", puts, sp, "P", spot, ivp, T), _qleg("BUY", puts, lp, "P", spot, ivp, T),
+            _qleg("SELL", calls, sc, "C", spot, ivc, T), _qleg("BUY", calls, lc, "C", spot, ivc, T)]
+    net = (legs[2]["px"] - legs[3]["px"]) + (legs[0]["px"] - legs[1]["px"])
+    max_loss = max(lc - sc, sp - lp) - net
     pop = 1.0 - abs(bs_delta(spot, sc, T, ivc, True)) - abs(bs_delta(spot, sp, T, ivp, False))
-    legs = [_leg("SELL", sp, "P", m_sp), _leg("BUY", lp, "P", m_lp),
-            _leg("SELL", sc, "C", m_sc), _leg("BUY", lc, "C", m_lc)]
-    return {"name": "Iron Condor — defined-risk IV-crush play",
-            "legs": [l["label"] for l in legs], "leg_detail": legs,
-            "net": credit, "net_kind": "credit", "max_profit": credit, "max_loss": max_loss,
-            "breakevens": [sp - credit, sc + credit], "pop": pop}
+    return _finish("Iron Condor — defined-risk IV-crush play", legs, "credit",
+                   max_loss, [sp - net, sc + net], pop)
 
 
 def _credit_spread(calls, puts, spot, iv, T, bullish, short_delta=0.25,
@@ -273,62 +301,51 @@ def _credit_spread(calls, puts, spot, iv, T, bullish, short_delta=0.25,
         return _iron_condor(calls, puts, spot, iv, iv, T)
     if bullish:
         s = _by_delta(puts, spot, iv, T, False, short_delta)
-        w = max(2 * _step(puts), round(spot * width_frac, 0))
-        lng = _nearest(puts, s - w)
-        m_s = _mid(puts, s, spot, iv, T, False); m_l = _mid(puts, lng, spot, iv, T, False)
-        credit = m_s - m_l
-        width, be = s - lng, s - credit
+        lng = _nearest(puts, s - max(2 * _step(puts), round(spot * width_frac, 0)))
+        legs = [_qleg("SELL", puts, s, "P", spot, iv, T), _qleg("BUY", puts, lng, "P", spot, iv, T)]
+        width, name = s - lng, f"Bull Put Credit Spread — bullish {tag}"
         pop = 1.0 - abs(bs_delta(spot, s, T, iv, False))
-        legs = [_leg("SELL", s, "P", m_s), _leg("BUY", lng, "P", m_l)]
-        name = f"Bull Put Credit Spread — bullish {tag}"
+        be_fn = lambda net: [s - net]
     else:
         s = _by_delta(calls, spot, iv, T, True, short_delta)
-        w = max(2 * _step(calls), round(spot * width_frac, 0))
-        lng = _nearest(calls, s + w)
-        m_s = _mid(calls, s, spot, iv, T, True); m_l = _mid(calls, lng, spot, iv, T, True)
-        credit = m_s - m_l
-        width, be = lng - s, s + credit
+        lng = _nearest(calls, s + max(2 * _step(calls), round(spot * width_frac, 0)))
+        legs = [_qleg("SELL", calls, s, "C", spot, iv, T), _qleg("BUY", calls, lng, "C", spot, iv, T)]
+        width, name = lng - s, f"Bear Call Credit Spread — bearish {tag}"
         pop = 1.0 - abs(bs_delta(spot, s, T, iv, True))
-        legs = [_leg("SELL", s, "C", m_s), _leg("BUY", lng, "C", m_l)]
-        name = f"Bear Call Credit Spread — bearish {tag}"
-    return {"name": name, "legs": [l["label"] for l in legs], "leg_detail": legs,
-            "net": credit, "net_kind": "credit",
-            "max_profit": credit, "max_loss": width - credit, "breakevens": [be], "pop": pop}
+        be_fn = lambda net: [s + net]
+    net = legs[0]["px"] - legs[1]["px"]
+    return _finish(name, legs, "credit", width - net, be_fn(net), pop)
 
 
 def _long_strangle(calls, puts, spot, ivc, ivp, T):
     kc = _by_delta(calls, spot, ivc, T, True, 0.30) or _nearest(calls, spot * 1.05)
     kp = _by_delta(puts, spot, ivp, T, False, 0.30) or _nearest(puts, spot * 0.95)
-    m_p = _mid(puts, kp, spot, ivp, T, False); m_c = _mid(calls, kc, spot, ivc, T, True)
-    debit = m_p + m_c
-    legs = [_leg("BUY", kp, "P", m_p), _leg("BUY", kc, "C", m_c)]
-    return {"name": "Long Strangle — market under-pricing the move",
-            "legs": [l["label"] for l in legs], "leg_detail": legs,
-            "net": debit, "net_kind": "debit",
-            "max_profit": float("inf"), "max_loss": debit,
-            "breakevens": [kp - debit, kc + debit], "pop": float("nan")}
+    legs = [_qleg("BUY", puts, kp, "P", spot, ivp, T), _qleg("BUY", calls, kc, "C", spot, ivc, T)]
+    debit = legs[0]["px"] + legs[1]["px"]
+    out = _finish("Long Strangle — market under-pricing the move", legs, "debit",
+                  debit, [kp - debit, kc + debit], float("nan"))
+    out["max_profit"] = float("inf")
+    return out
 
 
 def _debit_spread(calls, puts, spot, iv, T, bullish):
     if bullish:
         lng = _nearest(calls, spot)
         s = _nearest(calls, lng + max(2 * _step(calls), round(spot * 0.05, 0)))
-        m_l = _mid(calls, lng, spot, iv, T, True); m_s = _mid(calls, s, spot, iv, T, True)
-        debit = m_l - m_s
-        width, be = s - lng, lng + debit
-        legs = [_leg("BUY", lng, "C", m_l), _leg("SELL", s, "C", m_s)]
-        name = "Bull Call Debit Spread — cheap directional"
+        legs = [_qleg("BUY", calls, lng, "C", spot, iv, T), _qleg("SELL", calls, s, "C", spot, iv, T)]
+        width, name = s - lng, "Bull Call Debit Spread — cheap directional"
+        debit = legs[0]["px"] - legs[1]["px"]
+        be = [lng + debit]
     else:
         lng = _nearest(puts, spot)
         s = _nearest(puts, lng - max(2 * _step(puts), round(spot * 0.05, 0)))
-        m_l = _mid(puts, lng, spot, iv, T, False); m_s = _mid(puts, s, spot, iv, T, False)
-        debit = m_l - m_s
-        width, be = lng - s, lng - debit
-        legs = [_leg("BUY", lng, "P", m_l), _leg("SELL", s, "P", m_s)]
-        name = "Bear Put Debit Spread — cheap directional"
-    return {"name": name, "legs": [l["label"] for l in legs], "leg_detail": legs,
-            "net": debit, "net_kind": "debit",
-            "max_profit": width - debit, "max_loss": debit, "breakevens": [be], "pop": float("nan")}
+        legs = [_qleg("BUY", puts, lng, "P", spot, iv, T), _qleg("SELL", puts, s, "P", spot, iv, T)]
+        width, name = lng - s, "Bear Put Debit Spread — cheap directional"
+        debit = legs[0]["px"] - legs[1]["px"]
+        be = [lng - debit]
+    out = _finish(name, legs, "debit", debit, be, float("nan"))
+    out["max_profit"] = width - debit
+    return out
 
 
 def _payoff_fig(strat, spot, lo, hi, dark=False):
@@ -535,6 +552,12 @@ def _analyze_impl(symbol: str, live: bool = False) -> dict:
     else:
         verdict = "STAND ASIDE — no clear edge"
 
+    if strat is not None and strat.get("thin"):
+        verdict = "STAND ASIDE — structure is illiquid (no live market on the short strikes)"
+        reasons.append("→ The chain here has no real two-sided quotes / open interest on the "
+                       "strikes we'd trade — any 'credit' is unfillable. Skip until liquidity shows up.")
+        strat = None
+
     return {
         "symbol": symbol, "error": None,
         "spot": spot, "next_earn": next_earn, "dte_earn": dte_earn,
@@ -618,20 +641,29 @@ def _live_recheck(sym: str, kind: str, cached: dict):
         st.caption("• " + str(reason))
 
 
+_SRC_TAG = {"quote": "", "last": "  ⚠ last-trade (no live bid)", "model": "  ⚠ model price (no market)"}
+
+
 def _render_legs(strat: dict):
-    """Show each leg with its estimated mid price and a per-leg debit/credit sign."""
+    """Each leg with its price, price source, and a per-leg cash sign."""
     detail = strat.get("leg_detail")
     if not detail:
-        _render_legs(strat)
+        for leg in strat.get("legs", []):
+            st.write(f"- {leg}")
         return
     for l in detail:
         px = l.get("px")
         sign = "+" if l["action"] == "SELL" else "−"   # SELL brings cash in
+        tag = _SRC_TAG.get(l.get("src", "quote"), "")
         if _fin(px):
-            _md(f"- **{l['action']} {l['strike']:g}{l['right']}**  ·  mid ≈ ${px:.2f}  "
-                f"→ {sign}${px*100:.0f}/contract")
+            _md(f"- **{l['action']} {l['strike']:g}{l['right']}**  ·  ≈ ${px:.2f}  "
+                f"→ {sign}${px*100:.0f}/contract{tag}")
         else:
             _md(f"- **{l['action']} {l['strike']:g}{l['right']}**  ·  _no quote_ (feed gap)")
+    if strat.get("thin"):
+        st.warning("⚠ **Illiquid** — the short leg has no live two-sided market (thin/no open "
+                   "interest). The credit above is an estimate you likely can't actually fill. "
+                   "Treat as info only, not a tradeable ticket.")
 
 
 def _md(text: str):
@@ -1019,15 +1051,21 @@ def _premium_impl(symbol: str, dte_target: int = 35, short_delta: float = 0.20,
         return {"symbol": symbol, "error": "no options"}
 
     now = pd.Timestamp.now(tz="UTC")
-    # expiry closest to target, within 20–55 DTE
-    cand = []
+    # Prefer the standard monthly expiry (3rd Friday) in the 20–55 DTE window —
+    # that's where option open interest / liquidity concentrates. Fall back to
+    # the nearest weekly to the target only if no monthly is in range.
+    cand, monthlies = [], []
     for e in expiries:
-        d = (pd.Timestamp(e).tz_localize("UTC") - now).days
+        et = pd.Timestamp(e)
+        d = (et.tz_localize("UTC") - now).days
         if 20 <= d <= 55:
             cand.append((abs(d - dte_target), e, d))
-    if not cand:
+            if et.weekday() == 4 and 15 <= et.day <= 21:      # 3rd Friday
+                monthlies.append((abs(d - dte_target), e, d))
+    pool = monthlies or cand
+    if not pool:
         return {"symbol": symbol, "skip": "no expiry in 20–55 DTE"}
-    _, exp, dte = min(cand)
+    _, exp, dte = min(pool)
     exp_ts = pd.Timestamp(exp).tz_localize("UTC")
 
     # hard filter: no earnings between now and expiry + 2 days
@@ -1073,6 +1111,8 @@ def _premium_impl(symbol: str, dte_target: int = 35, short_delta: float = 0.20,
         style = "Iron Condor — rangebound"
     if strat is None or not _fin(strat.get("max_loss")) or strat["max_loss"] <= 0:
         return {"symbol": symbol, "skip": "could not build a clean spread"}
+    if strat.get("thin"):
+        return {"symbol": symbol, "skip": "illiquid chain — short leg has no live market"}
 
     credit, max_loss = strat["net"], strat["max_loss"]
     pop = strat.get("pop", float("nan"))
