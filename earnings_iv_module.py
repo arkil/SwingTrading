@@ -231,6 +231,13 @@ def _mid(df, K, spot, iv, T, is_call):
     return bs_price(spot, K, T, iv, is_call)
 
 
+def _leg(action: str, K: float, right: str, px: float) -> dict:
+    """One option leg. `legs[i]` string stays parseable ('SELL 98P'); price rides
+    alongside so the ticket can show it."""
+    return {"action": action, "strike": float(K), "right": right, "px": round(float(px), 2),
+            "label": f"{action} {K:g}{right}"}
+
+
 def _iron_condor(calls, puts, spot, ivc, ivp, T, short_delta=0.16):
     sc = _by_delta(calls, spot, ivc, T, True, short_delta)
     sp = _by_delta(puts, spot, ivp, T, False, short_delta)
@@ -238,12 +245,15 @@ def _iron_condor(calls, puts, spot, ivc, ivp, T, short_delta=0.16):
         return None
     width = max(round((sc - sp) * 0.25, 0), _step(calls))
     lc, lp = _nearest(calls, sc + width), _nearest(puts, sp - width)
-    credit = (_mid(calls, sc, spot, ivc, T, True) - _mid(calls, lc, spot, ivc, T, True)
-              + _mid(puts, sp, spot, ivp, T, False) - _mid(puts, lp, spot, ivp, T, False))
+    m_sp = _mid(puts, sp, spot, ivp, T, False); m_lp = _mid(puts, lp, spot, ivp, T, False)
+    m_sc = _mid(calls, sc, spot, ivc, T, True); m_lc = _mid(calls, lc, spot, ivc, T, True)
+    credit = (m_sc - m_lc) + (m_sp - m_lp)
     max_loss = max(lc - sc, sp - lp) - credit
     pop = 1.0 - abs(bs_delta(spot, sc, T, ivc, True)) - abs(bs_delta(spot, sp, T, ivp, False))
+    legs = [_leg("SELL", sp, "P", m_sp), _leg("BUY", lp, "P", m_lp),
+            _leg("SELL", sc, "C", m_sc), _leg("BUY", lc, "C", m_lc)]
     return {"name": "Iron Condor — defined-risk IV-crush play",
-            "legs": [f"SELL {sp:g}P", f"BUY {lp:g}P", f"SELL {sc:g}C", f"BUY {lc:g}C"],
+            "legs": [l["label"] for l in legs], "leg_detail": legs,
             "net": credit, "net_kind": "credit", "max_profit": credit, "max_loss": max_loss,
             "breakevens": [sp - credit, sc + credit], "pop": pop}
 
@@ -257,28 +267,36 @@ def _credit_spread(calls, puts, spot, iv, T, bullish, short_delta=0.25,
         s = _by_delta(puts, spot, iv, T, False, short_delta)
         w = max(2 * _step(puts), round(spot * width_frac, 0))
         lng = _nearest(puts, s - w)
-        credit = _mid(puts, s, spot, iv, T, False) - _mid(puts, lng, spot, iv, T, False)
+        m_s = _mid(puts, s, spot, iv, T, False); m_l = _mid(puts, lng, spot, iv, T, False)
+        credit = m_s - m_l
         width, be = s - lng, s - credit
         pop = 1.0 - abs(bs_delta(spot, s, T, iv, False))
-        legs, name = [f"SELL {s:g}P", f"BUY {lng:g}P"], f"Bull Put Credit Spread — bullish {tag}"
+        legs = [_leg("SELL", s, "P", m_s), _leg("BUY", lng, "P", m_l)]
+        name = f"Bull Put Credit Spread — bullish {tag}"
     else:
         s = _by_delta(calls, spot, iv, T, True, short_delta)
         w = max(2 * _step(calls), round(spot * width_frac, 0))
         lng = _nearest(calls, s + w)
-        credit = _mid(calls, s, spot, iv, T, True) - _mid(calls, lng, spot, iv, T, True)
+        m_s = _mid(calls, s, spot, iv, T, True); m_l = _mid(calls, lng, spot, iv, T, True)
+        credit = m_s - m_l
         width, be = lng - s, s + credit
         pop = 1.0 - abs(bs_delta(spot, s, T, iv, True))
-        legs, name = [f"SELL {s:g}C", f"BUY {lng:g}C"], f"Bear Call Credit Spread — bearish {tag}"
-    return {"name": name, "legs": legs, "net": credit, "net_kind": "credit",
+        legs = [_leg("SELL", s, "C", m_s), _leg("BUY", lng, "C", m_l)]
+        name = f"Bear Call Credit Spread — bearish {tag}"
+    return {"name": name, "legs": [l["label"] for l in legs], "leg_detail": legs,
+            "net": credit, "net_kind": "credit",
             "max_profit": credit, "max_loss": width - credit, "breakevens": [be], "pop": pop}
 
 
 def _long_strangle(calls, puts, spot, ivc, ivp, T):
     kc = _by_delta(calls, spot, ivc, T, True, 0.30) or _nearest(calls, spot * 1.05)
     kp = _by_delta(puts, spot, ivp, T, False, 0.30) or _nearest(puts, spot * 0.95)
-    debit = _mid(calls, kc, spot, ivc, T, True) + _mid(puts, kp, spot, ivp, T, False)
+    m_p = _mid(puts, kp, spot, ivp, T, False); m_c = _mid(calls, kc, spot, ivc, T, True)
+    debit = m_p + m_c
+    legs = [_leg("BUY", kp, "P", m_p), _leg("BUY", kc, "C", m_c)]
     return {"name": "Long Strangle — market under-pricing the move",
-            "legs": [f"BUY {kp:g}P", f"BUY {kc:g}C"], "net": debit, "net_kind": "debit",
+            "legs": [l["label"] for l in legs], "leg_detail": legs,
+            "net": debit, "net_kind": "debit",
             "max_profit": float("inf"), "max_loss": debit,
             "breakevens": [kp - debit, kc + debit], "pop": float("nan")}
 
@@ -287,16 +305,21 @@ def _debit_spread(calls, puts, spot, iv, T, bullish):
     if bullish:
         lng = _nearest(calls, spot)
         s = _nearest(calls, lng + max(2 * _step(calls), round(spot * 0.05, 0)))
-        debit = _mid(calls, lng, spot, iv, T, True) - _mid(calls, s, spot, iv, T, True)
+        m_l = _mid(calls, lng, spot, iv, T, True); m_s = _mid(calls, s, spot, iv, T, True)
+        debit = m_l - m_s
         width, be = s - lng, lng + debit
-        legs, name = [f"BUY {lng:g}C", f"SELL {s:g}C"], "Bull Call Debit Spread — cheap directional"
+        legs = [_leg("BUY", lng, "C", m_l), _leg("SELL", s, "C", m_s)]
+        name = "Bull Call Debit Spread — cheap directional"
     else:
         lng = _nearest(puts, spot)
         s = _nearest(puts, lng - max(2 * _step(puts), round(spot * 0.05, 0)))
-        debit = _mid(puts, lng, spot, iv, T, False) - _mid(puts, s, spot, iv, T, False)
+        m_l = _mid(puts, lng, spot, iv, T, False); m_s = _mid(puts, s, spot, iv, T, False)
+        debit = m_l - m_s
         width, be = lng - s, lng - debit
-        legs, name = [f"BUY {lng:g}P", f"SELL {s:g}P"], "Bear Put Debit Spread — cheap directional"
-    return {"name": name, "legs": legs, "net": debit, "net_kind": "debit",
+        legs = [_leg("BUY", lng, "P", m_l), _leg("SELL", s, "P", m_s)]
+        name = "Bear Put Debit Spread — cheap directional"
+    return {"name": name, "legs": [l["label"] for l in legs], "leg_detail": legs,
+            "net": debit, "net_kind": "debit",
             "max_profit": width - debit, "max_loss": debit, "breakevens": [be], "pop": float("nan")}
 
 
@@ -524,6 +547,22 @@ def _fin(x) -> bool:
     return isinstance(x, (int, float)) and math.isfinite(x)
 
 
+def _render_legs(strat: dict):
+    """Show each leg with its estimated mid price and a per-leg debit/credit sign."""
+    detail = strat.get("leg_detail")
+    if not detail:
+        _render_legs(strat)
+        return
+    for l in detail:
+        px = l.get("px")
+        sign = "+" if l["action"] == "SELL" else "−"   # SELL brings cash in
+        if _fin(px):
+            _md(f"- **{l['action']} {l['strike']:g}{l['right']}**  ·  mid ≈ ${px:.2f}  "
+                f"→ {sign}${px*100:.0f}/contract")
+        else:
+            _md(f"- **{l['action']} {l['strike']:g}{l['right']}**  ·  _no quote_ (feed gap)")
+
+
 def _md(text: str):
     """st.markdown with $ escaped — Streamlit renders bare $…$ as LaTeX."""
     st.markdown(str(text).replace("$", "\\$"))
@@ -747,23 +786,43 @@ def _render_scanner():
                                "Set to −4 to see BUY-side (long strangle / debit) ideas too.")
     risk_pct = f4.slider("Risk / trade %", 0.5, 5.0, 1.5, 0.5, key="scan_risk")
 
-    view = df.copy()
-    view["DTE_n"] = pd.to_numeric(view["DTE"], errors="coerce")
-    view = view[view["DTE_n"].fillna(999) <= days]
-    view["_act"] = view["Signal"].str.contains("SELL|BUY")
-    view["_conv"] = view["Score"].abs()          # signal strength, either direction
-    view = view[view["Score"] >= min_score]
-    if only_act:
-        view = view[view["_act"]]
-    view = (view.sort_values(["_act", "_conv"], ascending=[False, False])
-                .drop(columns=["_act", "_conv", "DTE_n"]))
+    def _filtered(d, days_, min_score_, only_act_):
+        v = d.copy()
+        v["DTE_n"] = pd.to_numeric(v["DTE"], errors="coerce")
+        v = v[v["DTE_n"].fillna(999) <= days_]
+        v["_act"] = v["Signal"].str.contains("SELL|BUY")
+        v["_conv"] = v["Score"].abs()
+        v = v[v["Score"] >= min_score_]
+        if only_act_:
+            v = v[v["_act"]]
+        return (v.sort_values(["_act", "_conv"], ascending=[False, False])
+                 .drop(columns=["_act", "_conv", "DTE_n"]))
+
+    view = _filtered(df, days, min_score, only_act)
 
     n_sell = int(df["Signal"].str.contains("SELL").sum())
     n_buy = int(df["Signal"].str.contains("BUY").sum())
-    st.success(f"cache: {n_sell} SELL · {n_buy} BUY · showing {len(view)} within {days}d")
+    n_err = meta.get("n_err", 0) if meta else 0
 
+    relaxed = None
     if view.empty:
-        st.info("Nothing matches these filters. Loosen the window / score, or untick the SELL/BUY filter.")
+        # auto-relax: widest window, all scores, include STAND ASIDE/WAIT rows too —
+        # never leave the page blank when the cache actually has data.
+        fallback = _filtered(df, int(pd.to_numeric(df["DTE"], errors="coerce").max() or days),
+                             -4.0, False)
+        if not fallback.empty:
+            view, relaxed = fallback, "widened the window and dropped the SELL/BUY-only filter"
+
+    st.success(f"cache: {n_sell} SELL · {n_buy} BUY · {len(df)} names analysed"
+              + (f" · {n_err} skipped (data outage — see below)" if n_err else "")
+              + f" · showing {len(view)}")
+
+    if relaxed:
+        st.warning(f"Nothing cleared your filters, so I {relaxed} to show what's actually in the "
+                   f"cache instead of a blank page. Tighten the filters above once there's more to pick from.")
+    if view.empty:
+        st.info("The cache itself is empty for this window — not a filter problem. Click **Refresh** "
+                "or widen the day range.")
         return
 
     st.dataframe(view, use_container_width=True, hide_index=True)
@@ -788,8 +847,7 @@ def _render_scanner():
             cL, cR = st.columns([1, 1])
             with cL:
                 st.markdown(f"**{strat['name']}**  ·  expiry `{r['front_exp']}`")
-                for leg in strat["legs"]:
-                    st.write(f"- {leg}")
+                _render_legs(strat)
                 _md(f"**Net {strat['net_kind']}:** ${strat['net']:.2f} (${strat['net']*100:.0f}/lot)")
                 _md("**Max loss:** " + (f"${strat['max_loss']*100:.0f}/lot" if _fin(strat.get("max_loss"))
                                              else "undefined"))
@@ -1026,21 +1084,40 @@ def _render_premium():
         return
 
     f1, f2, f3, f4 = st.columns(4)
-    good_only = f1.checkbox("Only GOOD-rated", value=True)
-    min_pop = f2.slider("Min PoP %", 50, 90, 70)
-    min_ann = f3.slider("Min ann. RoR %", 0, 150, 40, 10)
+    good_only = f1.checkbox("Only GOOD-rated", value=False)
+    min_pop = f2.slider("Min PoP %", 50, 90, 60)
+    min_ann = f3.slider("Min ann. RoR %", 0, 150, 0, 10)
     risk_pct = f4.slider("Risk / trade %", 0.5, 5.0, 1.5, 0.5, key="prem_risk")
 
-    view = df.copy()
-    view = view[pd.to_numeric(view["PoP %"], errors="coerce").fillna(0) >= min_pop]
-    view = view[pd.to_numeric(view["Ann. RoR %"], errors="coerce").fillna(0) >= min_ann]
-    if good_only:
-        view = view[view["Verdict"].str.contains("GOOD")]
-    view = view.sort_values("Quality", ascending=False)
+    def _filtered(d, pop_, ann_, good_):
+        v = d.copy()
+        v = v[pd.to_numeric(v["PoP %"], errors="coerce").fillna(0) >= pop_]
+        v = v[pd.to_numeric(v["Ann. RoR %"], errors="coerce").fillna(0) >= ann_]
+        if good_:
+            v = v[v["Verdict"].str.contains("GOOD")]
+        return v.sort_values("Quality", ascending=False)
 
-    st.success(f"{int(df['Verdict'].str.contains('GOOD').sum())} GOOD in cache · showing {len(view)}")
+    view = _filtered(df, min_pop, min_ann, good_only)
+    n_good = int(df["Verdict"].str.contains("GOOD").sum())
+    n_skip = len(meta.get("skipped", [])) if meta else 0
+
+    relaxed = None
     if view.empty:
-        st.info("Nothing clears these filters. Loosen PoP / annualised return, or untick GOOD-only.")
+        fallback = _filtered(df, 0, 0, False).head(10)
+        if not fallback.empty:
+            view, relaxed = fallback, "dropped every filter and I'm showing the top 10 by quality anyway"
+
+    st.success(f"{n_good} GOOD in cache · {len(df)} ideas analysed"
+              + (f" · {n_skip} skipped (data outage — see below)" if n_skip else "")
+              + f" · showing {len(view)}")
+
+    if relaxed:
+        st.warning(f"Nothing cleared your filters, so I {relaxed} instead of showing a blank page — "
+                   f"these are rated 'marginal', not GOOD, so treat them as ideas to check manually, not "
+                   f"a green light. Tighten the filters once the cache has more to offer.")
+    if view.empty:
+        st.info("The cache itself has no ideas right now — not a filter problem. Click **Refresh** "
+                "or check the skipped-names list below (likely a data-feed issue).")
         return
 
     st.dataframe(view, use_container_width=True, hide_index=True)
@@ -1061,8 +1138,7 @@ def _render_premium():
             cL, cR = st.columns(2)
             with cL:
                 st.markdown(f"**{s['name']}**  ·  expiry `{r['exp']}`")
-                for leg in s["legs"]:
-                    st.write(f"- {leg}")
+                _render_legs(s)
                 _md(f"**Net credit:** ${s['net']:.2f} (${s['net']*100:.0f}/lot)")
                 _md("**Max loss:** " + (f"${s['max_loss']*100:.0f}/lot" if _fin(s.get("max_loss")) else "undefined"))
                 _md("**Breakevens:** " + ", ".join(f"${b:.2f}" for b in s["breakevens"]))
