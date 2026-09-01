@@ -227,32 +227,37 @@ def _nearest(df, target):
 
 
 def _quote(df, K, spot, iv, T, is_call):
-    """Best price estimate for strike K + a liquidity read.
-    Returns (price, source, liquid) where source ∈ {'quote','last','model'} and
-    `liquid` means there's a real two-sided market you could actually fill:
-    both bid & ask present, spread not insane, and some open interest."""
+    """Price estimate for strike K + a liquidity read.
+    Returns (price, source, liquid, info) where source ∈ {'quote','last','model'}.
+    `liquid` = a market you could realistically fill a spread into: two-sided
+    quote, spread not insane, real open interest AND evidence it actually trades
+    (daily volume, or deep OI as a proxy for a name that trades every day).
+    `info` = {'oi': int, 'vol': int} for display."""
     theo = bs_price(spot, K, T, iv, is_call)
-    row = df[df["strike"] == K]
-    if row.empty:
-        return theo, "model", False
-    r = row.iloc[0]
     def _f(x):
         try:
             x = float(x)
             return x if math.isfinite(x) else 0.0
         except Exception:
             return 0.0
+    row = df[df["strike"] == K]
+    if row.empty:
+        return theo, "model", False, {"oi": 0, "vol": 0}
+    r = row.iloc[0]
     b, a, lp = _f(r.get("bid")), _f(r.get("ask")), _f(r.get("lastPrice"))
-    oi = _f(r.get("openInterest"))
+    oi, vol = _f(r.get("openInterest")), _f(r.get("volume"))
+    info = {"oi": int(oi), "vol": int(vol)}
     if b > 0 and a > 0:
         mid = (b + a) / 2.0
-        spread_ok = (a - b) <= max(0.15, 0.6 * mid)      # not a 3x-wide market
-        return mid, "quote", (spread_ok and oi >= 5)
+        spread_ok = (a - b) <= max(0.15, 0.5 * mid)          # not a >1.5x-wide market
+        traded = vol >= 10 or oi >= 250                       # trades today, or deep book
+        liquid = spread_ok and oi >= 50 and traded
+        return mid, "quote", liquid, info
     # no two-sided market → not fillable at a known price; anchor to the model,
     # nudged toward lastPrice only if it's in a sane band around theo
     if lp > 0 and 0.3 * theo <= lp <= 3 * theo:
-        return (lp + theo) / 2.0, "last", False
-    return theo, "model", False
+        return (lp + theo) / 2.0, "last", False, info
+    return theo, "model", False, info
 
 
 def _mid(df, K, spot, iv, T, is_call):
@@ -260,9 +265,10 @@ def _mid(df, K, spot, iv, T, is_call):
 
 
 def _qleg(action, df, K, right, spot, iv, T):
-    px, src, liq = _quote(df, K, spot, iv, T, right == "C")
+    px, src, liq, info = _quote(df, K, spot, iv, T, right == "C")
     return {"action": action, "strike": float(K), "right": right, "px": round(px, 2),
-            "src": src, "liquid": bool(liq), "label": f"{action} {K:g}{right}"}
+            "src": src, "liquid": bool(liq), "oi": info["oi"], "vol": info["vol"],
+            "label": f"{action} {K:g}{right}"}
 
 
 def _finish(name, legs, kind, max_loss, breakevens, pop):
@@ -655,15 +661,18 @@ def _render_legs(strat: dict):
         px = l.get("px")
         sign = "+" if l["action"] == "SELL" else "−"   # SELL brings cash in
         tag = _SRC_TAG.get(l.get("src", "quote"), "")
+        liq = f"  ·  OI {l.get('oi', 0):,} · vol {l.get('vol', 0):,}"
+        if l.get("src") == "quote" and not l.get("liquid"):
+            liq += "  ⚠ thin"
         if _fin(px):
             _md(f"- **{l['action']} {l['strike']:g}{l['right']}**  ·  ≈ ${px:.2f}  "
-                f"→ {sign}${px*100:.0f}/contract{tag}")
+                f"→ {sign}${px*100:.0f}/contract{tag}{liq}")
         else:
             _md(f"- **{l['action']} {l['strike']:g}{l['right']}**  ·  _no quote_ (feed gap)")
     if strat.get("thin"):
-        st.warning("⚠ **Illiquid** — the short leg has no live two-sided market (thin/no open "
-                   "interest). The credit above is an estimate you likely can't actually fill. "
-                   "Treat as info only, not a tradeable ticket.")
+        st.warning("⚠ **Illiquid** — a leg you'd be selling has no real market to fill into "
+                   "(thin open interest / no volume today). The credit above is an estimate you "
+                   "likely can't actually get. Info only, not a tradeable ticket.")
 
 
 def _md(text: str):
