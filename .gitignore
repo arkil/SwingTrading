@@ -21,3 +21,6 @@ artifacts/
 strategies/**/Data/cache/
 strategies/**/trades/
 strategies/**/experiments/
+
+# Earnings IV-Crush nightly prefetch cache (regenerated daily)
+Data/earnings_iv/
