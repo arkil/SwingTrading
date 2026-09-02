@@ -102,6 +102,8 @@ def _prices(ticker: str, start: str) -> pd.DataFrame:
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     df = df[["Close"]].dropna()
+    if getattr(df.index, "tz", None) is not None:   # keep index tz-naive so it
+        df.index = df.index.tz_localize(None)        # compares with naive earnings dates
     try:
         df.to_parquet(f)
     except Exception:
@@ -159,8 +161,10 @@ def backtest_earnings(universe=UNIVERSE, start_year=2016, vrp_factor=1.15,
             if not np.isfinite(base_iv) or base_iv <= 0.03 or S0 <= 0:
                 continue
 
+            # snapshot history BEFORE recording this event — no lookahead
             hist_move = np.mean(past_moves[-6:]) if len(past_moves) >= 3 else None
-            past_moves.append(actual_move)          # update AFTER (no lookahead)
+            hist_max_prior = max(past_moves[-8:]) if len(past_moves) >= 3 else None
+            past_moves.append(actual_move)
             if hist_move is None:
                 continue
 
@@ -177,10 +181,9 @@ def backtest_earnings(universe=UNIVERSE, start_year=2016, vrp_factor=1.15,
             # skip "too-rich historical mover" — mirrors the live tool
             if hist_move / max(base_iv * np.sqrt(T0), 1e-6) > 3.0:
                 continue
-            # tail guard: worst recent earnings move dwarfs the implied move →
+            # tail guard: worst PRIOR earnings move dwarfs the implied move →
             # a defined-risk condor can't span it (live gate: hist_max > 2.2×)
-            hist_max = max(past_moves[-8:])
-            if hist_max > 2.2 * implied_move:
+            if hist_max_prior is not None and hist_max_prior > 2.2 * implied_move:
                 continue
 
             # --- build the 16Δ iron condor ---

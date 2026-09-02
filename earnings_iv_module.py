@@ -1047,10 +1047,10 @@ def _backtest_note(kind: str):
                 "historical move ≥ 1.05 — without it, at VRP 1.00 the strategy *loses* (−34u); "
                 "term-structure / IV elevation alone no longer triggers a sell. **(2)** skip names "
                 "whose worst recent earnings move > 2.2× the implied move (un-condor-able tail).\n"
-                "- With both gates: win **80%**, avg **+11.8%** RoR/trade, max DD **1.8u** (was 17.5u), "
-                "2022 flips from −10.8u to +11.9u. *Magnitudes are BS-model-optimistic — trust the "
-                "direction, not the number.*\n"
-                "- Fat left tail without the gates: avg loser −43% of risk. Size ≤1–2% per event."
+                "- With both gates: win **74.5%**, avg **+5.2%** RoR/trade, ann. Sharpe **2.0**, "
+                "max DD **7.9u** (down from 17.5u), 2022 the only losing year (−4.1u). "
+                "*BS simulation — no slippage/fills; haircut the ~5%/trade edge.*\n"
+                "- Fat left tail: avg loser −42% of risk. Size ≤1–2% per event."
             )
         else:
             st.markdown(

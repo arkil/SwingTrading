@@ -25,25 +25,25 @@ rules under a stated assumption and shows the sensitivity.
 
 ### 1. Earnings IV-Crush — iron condor through the print (`VRP = 1.15`)
 
-Run twice: as originally written, and after adding the **tail guard** the
-backtest suggested (skip names whose worst recent earnings move > 2.2× the
-implied move — no condor can span those, and they produce the fat-tail losses):
+With the **tail guard** live (skip names whose worst *prior* earnings move
+> 2.2× the implied move — no condor can span those; they cluster the fat-tail
+losses). A first cut had a lookahead bug (the guard peeked at the current
+event's move); the numbers below are after fixing it:
 
 | metric | no gate | **+ tail guard** |
 |---|---|---|
-| trades | 1,888 (212/yr) | 1,406 (158/yr) |
-| win rate | 72.7% | **80.2%** |
-| avg return on risk / trade | +3.8% | **+11.8%** |
-| avg winner / avg loser | +21% / **−43%** | +21% / **−26%** |
-| equity @ 1u risk/trade | +71u, DD 17.5u | **+166u, DD 1.8u** |
-| worst year | **2022: −10.8u** | **2022: +11.9u** — every year positive |
+| trades | 1,888 (212/yr) | 1,415 (159/yr) |
+| win rate | 72.7% | **74.5%** |
+| avg return on risk / trade | +3.8% | **+5.2%** (median +19.6%) |
+| avg winner / avg loser | +21% / **−43%** | +21% / **−42%** |
+| equity @ 1u risk/trade | +71u, DD 17.5u | **+76u, DD 7.9u** (9.7 return/DD) |
+| annualised Sharpe ≈ | 1.6 | **2.0** |
+| worst year | **2022: −10.8u** | 2022: −4.1u (only losing year) |
 
-The tail guard is now a live gate (`tail_risk` in `_analyze_impl`). **Caveat:**
-the post-gate magnitudes flatter the strategy — the BS model likely overstates
-the entry credit for the surviving low-dispersion names (with the gate, even
-`VRP = 1.00` shows positive, which shouldn't happen at fair pricing). Trust the
-*direction* — filtering high-dispersion movers cuts the drawdown hard — not the
-absolute return figures.
+The tail guard is a live gate (`tail_risk` in `_analyze_impl`). It helps —
+lower drawdown, slightly higher win rate and expectancy — but modestly, not the
+4× improvement the lookahead-buggy first run showed. Still a BS simulation: no
+slippage, perfect fills, IV modelled as one number. Haircut the ~5%/trade edge.
 
 ### 2. Premium — no earnings — 35-DTE credit spread, managed at 50% / 21 DTE (`IV/RV = 1.10`)
 
