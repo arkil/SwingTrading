@@ -884,8 +884,17 @@ def _render_scanner():
         st.rerun()
 
     if df is None or df.empty:
-        st.info("Once a scan has run, this page lists every upcoming-earnings name with its "
-                "suggested structure — served instantly from cache.")
+        n_err = meta.get("n_err", 0) if meta else 0
+        if meta and n_err:
+            st.warning(f"The last scan analysed **0 names** — {n_err} skipped, mostly because "
+                       "yfinance's option IV feed was down at scan time.  Data outage, not a "
+                       "market call — hit **Refresh** now, or wait for the 10:05 / 13:30 ET runs.")
+            if meta.get("errors"):
+                with st.expander(f"the {n_err} skipped names"):
+                    st.caption(", ".join(meta["errors"]))
+        else:
+            st.info("No cached scan yet — **Refresh** lists every upcoming-earnings name with its "
+                    "suggested structure.")
         return
 
     # ── filters over the cached superset ────────────────────────────────────
@@ -1206,9 +1215,21 @@ def _render_premium():
         prog.empty(); st.cache_data.clear(); st.rerun()
 
     if df is None or df.empty:
-        st.info("Once a scan has run this lists the best defined-risk credit spreads on liquid "
-                "large caps with no earnings in the trade window — ranked by probability-weighted "
-                "annualised return on risk.")
+        n_skip = len(meta.get("skipped", [])) if meta else 0
+        stale_feed = sum(1 for s in (meta or {}).get("skipped", []) if "stale" in s or "IV feed" in s)
+        if meta and n_skip:
+            st.warning(f"The last scan found **0 tradeable ideas** — {n_skip} names skipped"
+                       + (f", {stale_feed} because yfinance's IV feed was down at scan time"
+                          if stale_feed > n_skip / 2 else "")
+                       + ".  This is a data outage, not a market call — hit **Refresh** now "
+                       "(feed is usually fine once the market's open), or the scheduled 10:05 / "
+                       "13:30 ET runs will repopulate it.")
+            with st.expander(f"the {n_skip} skipped names"):
+                st.caption(", ".join(meta["skipped"]))
+        else:
+            st.info("No cached scan yet. **Refresh** runs a live scan of the credible large-cap "
+                    "list — defined-risk credit spreads on names with liquid options and no "
+                    "earnings in the trade window, ranked best-first.")
         return
 
     f1, f2, f3, f4 = st.columns(4)

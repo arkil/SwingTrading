@@ -66,6 +66,42 @@ def _clean(obj):
     return obj
 
 
+def _safe_write(path, csv_path, rows, details, meta, min_keep=5, max_age_h=72):
+    """Persist the new scan — UNLESS it's degenerate (near-empty, i.e. a data
+    outage) and a recent non-degenerate cache already exists, in which case keep
+    the good one so a pre-market feed hiccup can't wipe the dashboard."""
+    if len(rows) < min_keep and os.path.exists(path):
+        try:
+            with open(path) as f:
+                old = json.load(f)
+            om = old.get("meta", {})
+            n_old = om.get("n_ideas", om.get("n_ok", 0))
+            age_h = (datetime.now(timezone.utc)
+                     - datetime.fromisoformat(om["built_at"])).total_seconds() / 3600
+            if n_old >= min_keep and age_h <= max_age_h:
+                om.setdefault("attempts", []).append(
+                    {"at": meta["built_at"], "n": len(rows),
+                     "note": f"degenerate scan ({meta.get('n_err') or len(meta.get('skipped', []))} "
+                             f"skipped — likely feed outage); kept the prior cache"})
+                old["meta"] = om
+                with open(path, "w") as f:
+                    json.dump(old, f)
+                print(f"  ↳ new scan had only {len(rows)} usable results — kept the prior "
+                      f"cache ({n_old} rows, {age_h:.0f}h old)")
+                return om
+        except Exception:
+            pass
+    with open(path, "w") as f:
+        json.dump({"rows": _clean(rows), "details": details, "meta": meta}, f)
+    if rows:
+        try:
+            import pandas as pd
+            pd.DataFrame(rows).to_csv(csv_path, index=False)
+        except Exception:
+            pass
+    return meta
+
+
 def load_latest():
     """Return (rows_df_or_list, details, meta) from the last prefetch.
     `rows` comes back as a pandas DataFrame if pandas is importable, else a list
@@ -133,17 +169,9 @@ def build_scan(universe: str = DEFAULT_UNIVERSE, days: int = DEFAULT_DAYS,
         "elapsed_sec": round(time.time() - t0, 1),
     }
 
-    with open(_JSON, "w") as f:
-        json.dump({"rows": _clean(rows), "details": details, "meta": meta}, f)
-    try:
-        import pandas as pd
-        if rows:
-            pd.DataFrame(rows).to_csv(_CSV, index=False)
-    except Exception:
-        pass
-
+    meta = _safe_write(_JSON, _CSV, rows, details, meta, min_keep=1)
     print(f"[prefetch] done in {meta['elapsed_sec']}s — "
-          f"{meta['n_ok']} ok, {meta['n_err']} skipped → {_JSON}")
+          f"{meta.get('n_ok', 0)} ok, {meta.get('n_err', 0)} skipped → {_JSON}")
     return meta
 
 
@@ -201,16 +229,9 @@ def build_premium_scan(tickers=None, dte_target: int = 35, progress=None) -> dic
         "skipped": skipped,
         "elapsed_sec": round(time.time() - t0, 1),
     }
-    with open(_PREM_JSON, "w") as f:
-        json.dump({"rows": _clean(rows), "details": details, "meta": meta}, f)
-    try:
-        import pandas as pd
-        if rows:
-            pd.DataFrame(rows).to_csv(_PREM_CSV, index=False)
-    except Exception:
-        pass
-    print(f"[premium] done in {meta['elapsed_sec']}s — {meta['n_ideas']} ideas, "
-          f"{meta['n_good']} GOOD, {len(skipped)} skipped → {_PREM_JSON}")
+    meta = _safe_write(_PREM_JSON, _PREM_CSV, rows, details, meta, min_keep=5)
+    print(f"[premium] done in {meta['elapsed_sec']}s — {meta.get('n_ideas', len(rows))} ideas, "
+          f"{meta.get('n_good', 0)} GOOD, {len(skipped)} skipped → {_PREM_JSON}")
     return meta
 
 
