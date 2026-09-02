@@ -40,7 +40,31 @@ _PREM_CSV = os.path.join(_DIR, "premium_latest.csv")
 
 DEFAULT_UNIVERSE = "both"   # S&P 500 + Nasdaq 100
 DEFAULT_DAYS = 14
-THROTTLE_SEC = 0.35         # gap between tickers — keeps yfinance happy
+POOL_WORKERS = 4           # small pool — fast, but below the level that trips
+                          # yfinance's "getaddrinfo() thread failed to start"
+
+
+def _run_pool(fn, items, workers=POOL_WORKERS, progress=None):
+    """Map `fn` over `items` with a small thread pool, yielding (item, result)
+    in completion order. `fn` must not raise (wrap internally)."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    done = 0
+    total = len(items)
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(fn, it): it for it in items}
+        for fut in as_completed(futs):
+            it = futs[fut]
+            done += 1
+            try:
+                res = fut.result()
+            except Exception as e:  # noqa: BLE001
+                res = {"error": f"{type(e).__name__}: {e}"}
+            if progress:
+                try:
+                    progress(done, total, it if isinstance(it, str) else it.get("symbol", ""))
+                except Exception:
+                    pass
+            yield it, res
 
 
 def _clean(obj):
@@ -133,29 +157,19 @@ def build_scan(universe: str = DEFAULT_UNIVERSE, days: int = DEFAULT_DAYS,
     print(f"[prefetch] {total} names reporting in next {days}d ({universe})")
 
     rows, details, errors = [], {}, []
-    for i, rep in enumerate(reporters):
+    for rep, r in _run_pool(lambda rp: _analyze_impl(rp["symbol"]), reporters, progress=progress):
         sym = rep["symbol"]
+        if not isinstance(r, dict) or r.get("error"):
+            errors.append(f"{sym} ({(r or {}).get('error', 'failed')})")
+            print(f"  [skip] {sym}: {(r or {}).get('error', 'failed')}")
+            continue
         try:
-            r = _analyze_impl(sym)
+            row = scan_row(rep, r)
+            details[sym] = _clean(r)
+            rows.append(row)
         except Exception as e:  # noqa: BLE001
-            r = {"symbol": sym, "error": f"{type(e).__name__}: {e}"}
-        if progress:
-            try:
-                progress(i + 1, total, sym)
-            except Exception:
-                pass
-        if r.get("error"):
-            errors.append(f"{sym} ({r['error']})")
-            print(f"  [skip] {sym}: {r['error']}")
-        else:
-            try:
-                row = scan_row(rep, r)
-                details[sym] = _clean(r)
-                rows.append(row)
-            except Exception as e:  # noqa: BLE001
-                errors.append(f"{sym} (row build failed: {type(e).__name__})")
-                print(f"  [skip] {sym}: row build failed: {e}")
-        time.sleep(THROTTLE_SEC)
+            errors.append(f"{sym} (row build failed: {type(e).__name__})")
+            print(f"  [skip] {sym}: row build failed: {e}")
 
     # sort: actionable first, then by score
     def _key(row):
@@ -207,26 +221,16 @@ def build_premium_scan(tickers=None, dte_target: int = 35, progress=None) -> dic
     print(f"[premium] scanning {total} credible names, ~{dte_target} DTE")
 
     rows, details, skipped = [], {}, []
-    for i, sym in enumerate(names):
+    for sym, r in _run_pool(lambda s: _premium_impl(s, dte_target=dte_target), names, progress=progress):
+        if not isinstance(r, dict) or r.get("error") or r.get("skip"):
+            skipped.append(f"{sym} ({(r or {}).get('error') or (r or {}).get('skip') or 'failed'})")
+            continue
         try:
-            r = _premium_impl(sym, dte_target=dte_target)
+            row = premium_row(r)
+            details[sym] = _clean(r)
+            rows.append(row)
         except Exception as e:  # noqa: BLE001
-            r = {"symbol": sym, "error": f"{type(e).__name__}: {e}"}
-        if progress:
-            try:
-                progress(i + 1, total, sym)
-            except Exception:
-                pass
-        if r.get("error") or r.get("skip"):
-            skipped.append(f"{sym} ({r.get('error') or r.get('skip')})")
-        else:
-            try:
-                row = premium_row(r)
-                details[sym] = _clean(r)
-                rows.append(row)
-            except Exception as e:  # noqa: BLE001
-                skipped.append(f"{sym} (row build failed: {type(e).__name__})")
-        time.sleep(THROTTLE_SEC)
+            skipped.append(f"{sym} (row build failed: {type(e).__name__})")
 
     rows.sort(key=lambda x: x["Quality"], reverse=True)
     meta = {

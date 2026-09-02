@@ -26,6 +26,7 @@ Research basis
 from __future__ import annotations
 
 import math
+import os
 import time
 import numpy as np
 import pandas as pd
@@ -57,6 +58,19 @@ def _retry(fn, tries: int = 4, base: float = 0.8, label: str = ""):
 # --------------------------------------------------------------------------- #
 def _norm_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+_SQRT2 = math.sqrt(2.0)
+
+
+def _ncdf_arr(x):
+    """Vectorised standard-normal CDF (Abramowitz–Stegun, |err| < 1e-7)."""
+    x = np.asarray(x, dtype=float)
+    t = 1.0 / (1.0 + 0.2316419 * np.abs(x))
+    d = 0.3989422804014327 * np.exp(-0.5 * x * x)
+    p = d * t * (0.319381530 + t * (-0.356563782 + t * (1.781477937
+                 + t * (-1.821255978 + t * 1.330274429))))
+    return np.where(x >= 0.0, 1.0 - p, p)
 
 
 def bs_delta(S, K, T, iv, is_call, r=0.045):
@@ -212,13 +226,18 @@ def _step(df):
     return float(np.median(s)) if len(s) else 1.0
 
 
-def _by_delta(df, spot, iv, T, is_call, target):
-    best, err = None, 1e9
-    for K in sorted(df["strike"].unique()):
-        d = abs(bs_delta(spot, K, T, iv, is_call))
-        if not math.isnan(d) and abs(d - target) < err:
-            err, best = abs(d - target), K
-    return best
+def _by_delta(df, spot, iv, T, is_call, target, r=0.045):
+    """Strike whose |delta| is closest to `target`. Vectorised over the chain."""
+    strikes = np.sort(df["strike"].unique().astype(float))
+    if T <= 0 or iv <= 0 or spot <= 0 or strikes.size == 0:
+        return None
+    with np.errstate(all="ignore"):
+        d1 = (np.log(spot / strikes) + (r + 0.5 * iv * iv) * T) / (iv * math.sqrt(T))
+        delta = _ncdf_arr(d1) if is_call else _ncdf_arr(d1) - 1.0
+        err = np.abs(np.abs(delta) - target)
+    err[~np.isfinite(err)] = np.inf
+    j = int(np.argmin(err))
+    return float(strikes[j]) if np.isfinite(err[j]) else None
 
 
 def _nearest(df, target):
@@ -364,7 +383,7 @@ def _debit_spread(calls, puts, spot, iv, T, bullish):
 
 
 def _payoff_fig(strat, spot, lo, hi, dark=False):
-    px = np.linspace(lo, hi, 400)
+    px = np.linspace(lo, hi, 160)
     pnl = np.zeros_like(px)
     for leg in strat["legs"]:
         side, rest = leg.split(" ", 1)
@@ -599,6 +618,21 @@ def analyze_ticker(symbol: str) -> dict:
 def _fin(x) -> bool:
     """True if x is a finite real number. Robust to None (JSON-cleaned nan/inf)."""
     return isinstance(x, (int, float)) and math.isfinite(x)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_scan(kind: str, _mtime: float):
+    """Parse the prefetch JSON once per file version — not on every widget
+    rerun. `_mtime` in the key invalidates the cache when the file changes."""
+    from earnings_prefetch import load_latest, load_premium
+    return (load_latest if kind == "earnings" else load_premium)()
+
+
+def _load_scan(kind: str):
+    from earnings_prefetch import _JSON, _PREM_JSON
+    path = _JSON if kind == "earnings" else _PREM_JSON
+    mt = os.path.getmtime(path) if os.path.exists(path) else 0.0
+    return _cached_scan(kind, mt)
 
 
 def _num(x, nd=None):
@@ -885,10 +919,10 @@ def scan_row(rep: dict, r: dict) -> dict:
 # --------------------------------------------------------------------------- #
 def _render_scanner():
     dark = st.session_state.get("dark_mode", False)
-    from earnings_prefetch import load_latest, build_scan, DEFAULT_UNIVERSE, DEFAULT_DAYS
+    from earnings_prefetch import build_scan, DEFAULT_UNIVERSE, DEFAULT_DAYS
     from earnings_cache import UNIVERSES
 
-    df, details, meta = load_latest()
+    df, details, meta = _load_scan("earnings")
 
     top = st.columns([2.4, 1.1, 0.9, 0.9])
     if meta:
@@ -1253,9 +1287,9 @@ def premium_row(r: dict) -> dict:
 
 def _render_premium():
     dark = st.session_state.get("dark_mode", False)
-    from earnings_prefetch import load_premium, build_premium_scan
+    from earnings_prefetch import build_premium_scan
 
-    df, details, meta = load_premium()
+    df, details, meta = _load_scan("premium")
 
     top = st.columns([2.6, 0.9, 0.9])
     if meta:
