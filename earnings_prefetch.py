@@ -66,7 +66,7 @@ def _clean(obj):
     return obj
 
 
-def _safe_write(path, csv_path, rows, details, meta, min_keep=5, max_age_h=72):
+def _safe_write(path, csv_path, rows, details, meta, min_keep=5, max_age_h=96):
     """Persist the new scan — UNLESS it's degenerate (near-empty, i.e. a data
     outage) and a recent non-degenerate cache already exists, in which case keep
     the good one so a pre-market feed hiccup can't wipe the dashboard."""
@@ -148,8 +148,13 @@ def build_scan(universe: str = DEFAULT_UNIVERSE, days: int = DEFAULT_DAYS,
             errors.append(f"{sym} ({r['error']})")
             print(f"  [skip] {sym}: {r['error']}")
         else:
-            details[sym] = _clean(r)
-            rows.append(scan_row(rep, r))
+            try:
+                row = scan_row(rep, r)
+                details[sym] = _clean(r)
+                rows.append(row)
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"{sym} (row build failed: {type(e).__name__})")
+                print(f"  [skip] {sym}: row build failed: {e}")
         time.sleep(THROTTLE_SEC)
 
     # sort: actionable first, then by score
@@ -215,8 +220,12 @@ def build_premium_scan(tickers=None, dte_target: int = 35, progress=None) -> dic
         if r.get("error") or r.get("skip"):
             skipped.append(f"{sym} ({r.get('error') or r.get('skip')})")
         else:
-            details[sym] = _clean(r)
-            rows.append(premium_row(r))
+            try:
+                row = premium_row(r)
+                details[sym] = _clean(r)
+                rows.append(row)
+            except Exception as e:  # noqa: BLE001
+                skipped.append(f"{sym} (row build failed: {type(e).__name__})")
         time.sleep(THROTTLE_SEC)
 
     rows.sort(key=lambda x: x["Quality"], reverse=True)

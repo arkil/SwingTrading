@@ -287,10 +287,12 @@ def _finish(name, legs, kind, max_loss, breakevens, pop):
 def _iron_condor(calls, puts, spot, ivc, ivp, T, short_delta=0.16):
     sc = _by_delta(calls, spot, ivc, T, True, short_delta)
     sp = _by_delta(puts, spot, ivp, T, False, short_delta)
-    if sc is None or sp is None:
+    if sc is None or sp is None or sc <= sp:
         return None
     width = max(round((sc - sp) * 0.25, 0), _step(calls))
     lc, lp = _nearest(calls, sc + width), _nearest(puts, sp - width)
+    if lc <= sc or lp >= sp:          # chain has no strikes past the shorts → no defined risk
+        return None
     legs = [_qleg("SELL", puts, sp, "P", spot, ivp, T), _qleg("BUY", puts, lp, "P", spot, ivp, T),
             _qleg("SELL", calls, sc, "C", spot, ivc, T), _qleg("BUY", calls, lc, "C", spot, ivc, T)]
     net = (legs[2]["px"] - legs[3]["px"]) + (legs[0]["px"] - legs[1]["px"])
@@ -308,18 +310,24 @@ def _credit_spread(calls, puts, spot, iv, T, bullish, short_delta=0.25,
     if bullish:
         s = _by_delta(puts, spot, iv, T, False, short_delta)
         lng = _nearest(puts, s - max(2 * _step(puts), round(spot * width_frac, 0)))
-        legs = [_qleg("SELL", puts, s, "P", spot, iv, T), _qleg("BUY", puts, lng, "P", spot, iv, T)]
         width, name = s - lng, f"Bull Put Credit Spread — bullish {tag}"
+        if width <= 0:      # chain has no strike below the short → no defined risk
+            return None
+        legs = [_qleg("SELL", puts, s, "P", spot, iv, T), _qleg("BUY", puts, lng, "P", spot, iv, T)]
         pop = 1.0 - abs(bs_delta(spot, s, T, iv, False))
         be_fn = lambda net: [s - net]
     else:
         s = _by_delta(calls, spot, iv, T, True, short_delta)
         lng = _nearest(calls, s + max(2 * _step(calls), round(spot * width_frac, 0)))
-        legs = [_qleg("SELL", calls, s, "C", spot, iv, T), _qleg("BUY", calls, lng, "C", spot, iv, T)]
         width, name = lng - s, f"Bear Call Credit Spread — bearish {tag}"
+        if width <= 0:
+            return None
+        legs = [_qleg("SELL", calls, s, "C", spot, iv, T), _qleg("BUY", calls, lng, "C", spot, iv, T)]
         pop = 1.0 - abs(bs_delta(spot, s, T, iv, True))
         be_fn = lambda net: [s + net]
     net = legs[0]["px"] - legs[1]["px"]
+    if net <= 0:            # short leg priced at/below the wing → not a real credit
+        return None
     return _finish(name, legs, "credit", width - net, be_fn(net), pop)
 
 
@@ -338,18 +346,19 @@ def _debit_spread(calls, puts, spot, iv, T, bullish):
     if bullish:
         lng = _nearest(calls, spot)
         s = _nearest(calls, lng + max(2 * _step(calls), round(spot * 0.05, 0)))
-        legs = [_qleg("BUY", calls, lng, "C", spot, iv, T), _qleg("SELL", calls, s, "C", spot, iv, T)]
         width, name = s - lng, "Bull Call Debit Spread — cheap directional"
-        debit = legs[0]["px"] - legs[1]["px"]
-        be = [lng + debit]
+        legs = [_qleg("BUY", calls, lng, "C", spot, iv, T), _qleg("SELL", calls, s, "C", spot, iv, T)]
+        be_fn = lambda deb: [lng + deb]
     else:
         lng = _nearest(puts, spot)
         s = _nearest(puts, lng - max(2 * _step(puts), round(spot * 0.05, 0)))
-        legs = [_qleg("BUY", puts, lng, "P", spot, iv, T), _qleg("SELL", puts, s, "P", spot, iv, T)]
         width, name = lng - s, "Bear Put Debit Spread — cheap directional"
-        debit = legs[0]["px"] - legs[1]["px"]
-        be = [lng - debit]
-    out = _finish(name, legs, "debit", debit, be, float("nan"))
+        legs = [_qleg("BUY", puts, lng, "P", spot, iv, T), _qleg("SELL", puts, s, "P", spot, iv, T)]
+        be_fn = lambda deb: [lng - deb]
+    debit = legs[0]["px"] - legs[1]["px"]
+    if width <= 0 or debit <= 0 or debit >= width:   # degenerate / no edge
+        return None
+    out = _finish(name, legs, "debit", debit, be_fn(debit), float("nan"))
     out["max_profit"] = width - debit
     return out
 
@@ -478,7 +487,8 @@ def _analyze_impl(symbol: str, live: bool = False) -> dict:
             rich -= 1; reasons.append(f"Front IV is only {iv_rv:.2f}× realized vol — options look cheap vs how the stock is actually moving.")
 
     # ── directional lean: trend + 25Δ put/call IV skew
-    ret10 = float(data["hist"]["Close"].iloc[-1] / data["hist"]["Close"].iloc[-11] - 1.0) * 100
+    _cl = data["hist"]["Close"]
+    ret10 = float(_cl.iloc[-1] / _cl.iloc[-11] - 1.0) * 100 if len(_cl) >= 11 else 0.0
     skew = None
     try:
         p25 = _by_delta(fp, spot, det["put"], T_front, False, 0.25)
@@ -495,7 +505,7 @@ def _analyze_impl(symbol: str, live: bool = False) -> dict:
         elif skew > 0.04: dir_score -= 1     # puts bid = downside fear
     lean = "bullish" if dir_score >= 1 else "bearish" if dir_score <= -1 else "neutral"
 
-    too_far = next_earn is None or dte_earn is None or dte_earn > 21 or dte_earn < -1
+    too_far = next_earn is None or dte_earn is None or dte_earn > 21 or dte_earn < 0
     strat, ivc, ivp = None, det["call"], det["put"]
     score = rich
 
@@ -514,7 +524,7 @@ def _analyze_impl(symbol: str, live: bool = False) -> dict:
     if too_far:
         if next_earn is None:
             verdict = "WAIT — no confirmed earnings date"
-        elif dte_earn is not None and dte_earn < -1:
+        elif dte_earn is not None and dte_earn < 0:
             verdict = "PASSED — already reported; IV has crushed"
         else:
             verdict = f"WAIT — earnings {dte_earn}d out; term structure hasn't loaded the event"
@@ -558,8 +568,12 @@ def _analyze_impl(symbol: str, live: bool = False) -> dict:
     else:
         verdict = "STAND ASIDE — no clear edge"
 
-    if strat is not None and strat.get("thin"):
-        verdict = "STAND ASIDE — structure is illiquid (no live market on the short strikes)"
+    if ("SELL" in verdict or "BUY" in verdict) and strat is None:
+        verdict = "STAND ASIDE — can't build a valid structure (no strikes past the shorts / degenerate chain)"
+        reasons.append("→ The option chain doesn't have the strikes needed for a defined-risk "
+                       "spread here. Skip.")
+    elif strat is not None and (strat.get("thin") or not _fin(strat.get("max_loss")) or strat["max_loss"] <= 0):
+        verdict = "STAND ASIDE — structure is illiquid / degenerate (no fillable market on the short strikes)"
         reasons.append("→ The chain here has no real two-sided quotes / open interest on the "
                        "strikes we'd trade — any 'credit' is unfillable. Skip until liquidity shows up.")
         strat = None
@@ -585,6 +599,17 @@ def analyze_ticker(symbol: str) -> dict:
 def _fin(x) -> bool:
     """True if x is a finite real number. Robust to None (JSON-cleaned nan/inf)."""
     return isinstance(x, (int, float)) and math.isfinite(x)
+
+
+def _num(x, nd=None):
+    """round() that never raises — returns None for NaN/Inf/None."""
+    try:
+        xf = float(x)
+        if not math.isfinite(xf):
+            return None
+        return round(xf, nd) if nd is not None else round(xf)
+    except (TypeError, ValueError):
+        return None
 
 
 def _live_recheck(sym: str, kind: str, cached: dict):
@@ -673,6 +698,23 @@ def _render_legs(strat: dict):
         st.warning("⚠ **Illiquid** — a leg you'd be selling has no real market to fill into "
                    "(thin open interest / no volume today). The credit above is an estimate you "
                    "likely can't actually get. Info only, not a tradeable ticket.")
+
+
+def _built_str(built_at) -> str:
+    """'Sep 02 13:21 ET (4h ago)' from a UTC ISO string; never raises."""
+    try:
+        t = pd.Timestamp(built_at)
+        if t.tzinfo is None:
+            t = t.tz_localize("UTC")
+        try:
+            local = t.tz_convert("America/New_York")
+            lbl = local.strftime("%b %d %H:%M ET")
+        except Exception:
+            lbl = t.strftime("%b %d %H:%M UTC")
+        age = (pd.Timestamp.now(tz="UTC") - t).total_seconds() / 3600
+        return f"{lbl} ({age:.0f}h ago)" if age < 48 else f"{lbl} ({age/24:.0f}d ago)"
+    except Exception:
+        return "unknown time"
 
 
 def _md(text: str):
@@ -823,18 +865,18 @@ def scan_row(rep: dict, r: dict) -> dict:
         "Ticker": r["symbol"],
         "Earnings": str(rep.get("date", "")),
         "When": rep.get("time", ""),
-        "DTE": r["dte_earn"],
-        "Spot": round(r["spot"], 2),
-        "Front IV %": round(r["front_iv"] * 100, 1),
-        "Term ratio": round(r["term_ratio"], 2),
-        "Impl move %": round(r["earn_move"], 1) if r["earn_move"] is not None else None,
-        "Hist avg %": round(r["hist_avg"], 1) if r["hist_avg"] else None,
-        "Impl/Hist": round(r["move_ratio"], 2) if not math.isnan(r["move_ratio"]) else None,
-        "Score": r["score"],
+        "DTE": _num(r.get("dte_earn")),
+        "Spot": _num(r.get("spot"), 2),
+        "Front IV %": _num((r.get("front_iv") or 0) * 100, 1),
+        "Term ratio": _num(r.get("term_ratio"), 2),
+        "Impl move %": _num(r.get("earn_move"), 1),
+        "Hist avg %": _num(r.get("hist_avg"), 1),
+        "Impl/Hist": _num(r.get("move_ratio"), 2),
+        "Score": _num(r.get("score"), 1) or 0,
         "Signal": f"{_VERDICT_ICON.get(vkey, '')} {r['verdict']}",
         "Structure": strat["name"].split(" — ")[0] if strat else "—",
         "Credit/Debit": (f"{strat['net_kind'][0].upper()} ${strat['net']:.2f}" if strat else "—"),
-        "Max loss $": (round(strat["max_loss"] * 100) if strat and _fin(strat.get("max_loss")) else None),
+        "Max loss $": (_num((strat.get("max_loss") or 0) * 100) if strat else None),
     }
 
 
@@ -850,18 +892,19 @@ def _render_scanner():
 
     top = st.columns([2.4, 1.1, 0.9, 0.9])
     if meta:
-        built = pd.Timestamp(meta["built_at"]).strftime("%b %d %H:%M")
-        _bt = pd.Timestamp(meta["built_at"])
-        if _bt.tzinfo is None:
-            _bt = _bt.tz_localize("UTC")
-        stale = (pd.Timestamp.now(tz="UTC") - _bt).total_seconds() / 3600
+        try:
+            _bt = pd.Timestamp(meta["built_at"])
+            _bt = _bt.tz_localize("UTC") if _bt.tzinfo is None else _bt
+            stale = (pd.Timestamp.now(tz="UTC") - _bt).total_seconds() / 3600
+        except Exception:
+            stale = 999
         badge = "🟢" if stale < 30 else "🟠"
         top[0].caption(
-            f"{badge} Last scan **{built}** ({stale:.0f}h ago) · "
-            f"{UNIVERSES.get(meta['universe'], meta['universe'])} · "
-            f"{meta['n_reporters']} reporting in {meta['days']}d · "
-            f"{meta['n_ok']} analysed, {meta['n_err']} skipped · "
-            f"pre-market job `manage_services.sh restart earnings-iv` reruns it daily"
+            f"{badge} Last scan **{_built_str(meta.get('built_at'))}** · "
+            f"{UNIVERSES.get(meta.get('universe'), meta.get('universe', '?'))} · "
+            f"{meta.get('n_reporters', '?')} reporting in {meta.get('days', '?')}d · "
+            f"{meta.get('n_ok', 0)} analysed, {meta.get('n_err', 0)} skipped · "
+            f"auto-refreshed 10:05 & 13:30 ET on weekdays"
         )
     else:
         top[0].warning("No cached scan yet — the pre-market job hasn't run. Pick a universe and **Refresh now**.")
@@ -899,8 +942,10 @@ def _render_scanner():
 
     # ── filters over the cached superset ────────────────────────────────────
     f1, f2, f3, f4 = st.columns([1, 1, 1, 1])
-    max_dte = int(pd.to_numeric(df["DTE"], errors="coerce").max() or DEFAULT_DAYS)
-    days = f1.slider("Earnings within (days)", 1, max(max_dte, 2), min(7, max_dte))
+    _dte_num = pd.to_numeric(df["DTE"], errors="coerce")
+    _mx = _dte_num.max()
+    max_dte = int(_mx) if pd.notna(_mx) and _mx >= 2 else max(DEFAULT_DAYS, 2)
+    days = f1.slider("Earnings within (days)", 1, max_dte, min(7, max_dte))
     only_act = f2.checkbox("Only SELL / BUY", value=True)
     min_score = f3.slider("Min score", -4.0, 4.0, -4.0, 0.5,
                           help="Richness score: >0 sell premium, <0 buy premium. "
@@ -929,8 +974,7 @@ def _render_scanner():
     if view.empty:
         # auto-relax: widest window, all scores, include STAND ASIDE/WAIT rows too —
         # never leave the page blank when the cache actually has data.
-        fallback = _filtered(df, int(pd.to_numeric(df["DTE"], errors="coerce").max() or days),
-                             -4.0, False)
+        fallback = _filtered(df, max_dte, -4.0, False)
         if not fallback.empty:
             view, relaxed = fallback, "widened the window and dropped the SELL/BUY-only filter"
 
@@ -962,8 +1006,7 @@ def _render_scanner():
             for reason in r["reasons"]:
                 st.markdown("- " + str(reason).replace("$", "\\$"))
             st.write(f"• 10-day trend {r['ret10']:+.1f}% → lean {r['lean']}")
-            st.caption(f"cached from the {pd.Timestamp(meta['built_at']).strftime('%b %d %H:%M')} scan"
-                       if meta else "cached scan")
+            st.caption(f"cached from the {_built_str(meta.get('built_at'))} scan" if meta else "cached scan")
             _live_recheck(sym, "earnings", r)
             if strat is None:
                 st.info("No structure in the cached scan — use **Live price & re-check** above to "
@@ -1037,6 +1080,12 @@ def _footer():
 # PREMIUM (NO EARNINGS) — high-probability defined-risk credit spreads on
 # liquid large caps, with no earnings inside the trade window.
 # ═════════════════════════════════════════════════════════════════════════════
+# ETFs / indices — no earnings events, so the "no earnings in window" filter
+# must not skip them just because yfinance has no earnings-date data.
+_NO_EARNINGS = {"SPY", "QQQ", "IWM", "DIA", "SMH", "XLF", "XLE", "XLK", "XLV", "XLY",
+                "XLP", "XLI", "XLU", "XLB", "XLRE", "XLC", "GLD", "SLV", "TLT", "HYG",
+                "EEM", "EFA", "VXX", "UVXY", "ARKK", "KRE", "XBI", "IBB", "SOXX"}
+
 # "Credible" = mega/large-cap, deep option liquidity, weekly + monthly chains.
 CREDIBLE_TICKERS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "AVGO", "AMD", "NFLX", "CRM",
@@ -1087,8 +1136,23 @@ def _premium_impl(symbol: str, dte_target: int = 35, short_delta: float = 0.20,
     exp_ts = pd.Timestamp(exp).tz_localize("UTC")
 
     # hard filter: no earnings between now and expiry + 2 days
-    if next_earn is not None and now - pd.Timedelta(days=1) <= next_earn <= exp_ts + pd.Timedelta(days=2):
-        return {"symbol": symbol, "skip": f"earnings {next_earn.date()} inside window"}
+    win_lo, win_hi = now - pd.Timedelta(days=1), exp_ts + pd.Timedelta(days=2)
+    if symbol not in _NO_EARNINGS:
+        if next_earn is not None:
+            if win_lo <= next_earn <= win_hi:
+                return {"symbol": symbol, "skip": f"earnings {next_earn.date()} inside window"}
+        else:
+            # yfinance gave no confirmed date — estimate from the last known report
+            # (~quarterly) and skip if it could plausibly land in the window.
+            past = data.get("past_earn") or []
+            if past:
+                est = past[-1] + pd.Timedelta(days=91)
+                while est < now - pd.Timedelta(days=45):
+                    est += pd.Timedelta(days=91)
+                if win_lo - pd.Timedelta(days=12) <= est <= win_hi + pd.Timedelta(days=12):
+                    return {"symbol": symbol, "skip": f"est. earnings ~{est.date()} may be in window (no confirmed date)"}
+            else:
+                return {"symbol": symbol, "skip": "no earnings-date data — can't confirm the window is clear"}
 
     try:
         calls, puts = _ch(symbol, exp)
@@ -1173,17 +1237,17 @@ def premium_row(r: dict) -> dict:
     s = r["strat"]
     return {
         "Ticker": r["symbol"],
-        "Verdict": ("🟢 GOOD" if r["ok"] else "⚪ marginal"),
+        "Verdict": ("🟢 GOOD" if r.get("ok") else "⚪ marginal"),
         "Structure": s["name"].split(" — ")[0],
-        "Exp": r["exp"], "DTE": r["dte"], "Spot": round(r["spot"], 2),
-        "IV %": round(r["iv"] * 100, 1), "IV/RV": round(r["iv_rv"], 2),
-        "Trend": r["trend"],
-        "Credit": round(r["credit"], 2),
-        "Max loss $": round(r["max_loss"] * 100),
-        "RoR %": round(r["ror"] * 100),
-        "Ann. RoR %": round(r["ann_ror"] * 100),
-        "PoP %": round(r["pop"] * 100) if _fin(r["pop"]) else None,
-        "Quality": round(r["quality"]),
+        "Exp": r.get("exp", ""), "DTE": _num(r.get("dte")), "Spot": _num(r.get("spot"), 2),
+        "IV %": _num((r.get("iv") or 0) * 100, 1), "IV/RV": _num(r.get("iv_rv"), 2),
+        "Trend": r.get("trend", ""),
+        "Credit": _num(r.get("credit"), 2),
+        "Max loss $": _num((r.get("max_loss") or 0) * 100),
+        "RoR %": _num((r.get("ror") or 0) * 100),
+        "Ann. RoR %": _num((r.get("ann_ror") or 0) * 100),
+        "PoP %": _num((r.get("pop") or 0) * 100) if _fin(r.get("pop")) else None,
+        "Quality": _num(r.get("quality")) or 0,
     }
 
 
@@ -1195,13 +1259,15 @@ def _render_premium():
 
     top = st.columns([2.6, 0.9, 0.9])
     if meta:
-        _bt = pd.Timestamp(meta["built_at"])
-        if _bt.tzinfo is None:
-            _bt = _bt.tz_localize("UTC")
-        age = (pd.Timestamp.now(tz="UTC") - _bt).total_seconds() / 3600
-        top[0].caption(f"{'🟢' if age < 30 else '🟠'} Last scan {_bt.strftime('%b %d %H:%M')} "
-                       f"({age:.0f}h ago) · {meta['n_names']} credible names · "
-                       f"{meta['n_ideas']} ideas, {meta['n_good']} rated GOOD · "
+        try:
+            _bt = pd.Timestamp(meta["built_at"])
+            _bt = _bt.tz_localize("UTC") if _bt.tzinfo is None else _bt
+            age = (pd.Timestamp.now(tz="UTC") - _bt).total_seconds() / 3600
+        except Exception:
+            age = 999
+        top[0].caption(f"{'🟢' if age < 30 else '🟠'} Last scan {_built_str(meta.get('built_at'))} · "
+                       f"{meta.get('n_names', '?')} credible names · "
+                       f"{meta.get('n_ideas', 0)} ideas, {meta.get('n_good', 0)} rated GOOD · "
                        f"no-earnings-in-window filter applied")
     else:
         top[0].warning("No cached premium scan yet — click **Refresh** (or wait for the pre-market job).")
@@ -1283,8 +1349,7 @@ def _render_premium():
         with st.expander(f"{sym} · {r['style']} · {r['verdict']}"):
             for reason in r["reasons"]:
                 st.markdown("- " + str(reason).replace("$", "\\$"))
-            st.caption(f"cached from the {pd.Timestamp(meta['built_at']).strftime('%b %d %H:%M')} scan"
-                       if meta else "cached scan")
+            st.caption(f"cached from the {_built_str(meta.get('built_at'))} scan" if meta else "cached scan")
             _live_recheck(sym, "premium", r)
             risk_budget, loss_per_lot, lots = _sizing(s, account, risk_pct)
             cL, cR = st.columns(2)
