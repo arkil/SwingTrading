@@ -99,32 +99,25 @@ def _load_ticker(symbol: str):
 
 
 def _load_ticker_impl(symbol: str):
-    tk = yf.Ticker(symbol)
-    hist = _retry(lambda: tk.history(period="1y", auto_adjust=False), label=f"{symbol} history")
+    from earnings_cache import cached_history, cached_earnings_dates
+
+    hist = cached_history(symbol, retry=_retry)          # parquet disk cache (~4h)
     if hist is None or hist.empty:
         raise ValueError(f"No price history for '{symbol}'.")
     spot = float(hist["Close"].iloc[-1])
 
-    earn_dates = None
-    try:
-        earn_dates = tk.get_earnings_dates(limit=24)
-    except Exception:
-        pass
-
-    next_earn, past_earn = None, []
     now = pd.Timestamp.now(tz="UTC")
-    if earn_dates is not None and not earn_dates.empty:
-        idx = earn_dates.index
-        idx = idx.tz_convert("UTC") if idx.tz is not None else idx.tz_localize("UTC")
-        for ts in sorted(idx):
-            if ts >= now - pd.Timedelta(days=2):
-                if next_earn is None:
-                    next_earn = ts
-            else:
-                past_earn.append(ts)
+    next_earn, past_earn = None, []
+    for ts in cached_earnings_dates(symbol):             # json disk cache (~3d)
+        ts = ts if ts.tzinfo is not None else ts.tz_localize("UTC")
+        if ts >= now - pd.Timedelta(days=2):
+            if next_earn is None:
+                next_earn = ts
+        else:
+            past_earn.append(ts)
     if next_earn is None:
         try:
-            cal = tk.calendar
+            cal = yf.Ticker(symbol).calendar
             d = None
             if isinstance(cal, dict) and cal.get("Earnings Date"):
                 d = cal["Earnings Date"][0]
@@ -135,12 +128,26 @@ def _load_ticker_impl(symbol: str):
         except Exception:
             pass
 
-    expiries = list(_retry(lambda: tk.options, label=f"{symbol} options"))
+    expiries = list(_retry(lambda: yf.Ticker(symbol).options, label=f"{symbol} options"))
     return {
         "hist": hist, "spot": spot,
         "next_earn": next_earn, "past_earn": sorted(past_earn)[-12:],
         "expiries": expiries,
     }
+
+
+def _fresh_spot(symbol: str):
+    """Live last price (for the on-demand 're-check' — disk-cached history spot
+    can be a few hours stale). Returns None on failure."""
+    try:
+        fi = yf.Ticker(symbol).fast_info
+        for k in ("lastPrice", "last_price"):
+            v = fi.get(k) if hasattr(fi, "get") else getattr(fi, k, None)
+            if v and float(v) > 0:
+                return float(v)
+    except Exception:
+        pass
+    return None
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -429,6 +436,8 @@ def _analyze_impl(symbol: str, live: bool = False) -> dict:
     spot, next_earn, expiries = data["spot"], data["next_earn"], data["expiries"]
     if not expiries:
         return {"symbol": symbol, "error": "no listed options"}
+    if live:
+        spot = _fresh_spot(symbol) or spot
 
     now_utc = pd.Timestamp.now(tz="UTC")
     dte_earn = (next_earn - now_utc).days if next_earn is not None else None
@@ -1028,10 +1037,14 @@ def _render_scanner():
     st.download_button("⬇ Download CSV", view.to_csv(index=False).encode(),
                        f"earnings_iv_scan_{days}d.csv", "text/csv")
 
-    # ── trade tickets from cached detail ───────────────────────────────────
+    # ── trade tickets from cached detail (cap to keep the page light) ──────
     st.divider()
-    st.subheader("Trade tickets")
-    for sym in view["Ticker"].tolist():
+    _tix = view["Ticker"].tolist()
+    _TICKET_CAP = 15
+    st.subheader(f"Trade tickets"
+                 + (f" — top {_TICKET_CAP} of {len(_tix)} (filter to see others)"
+                    if len(_tix) > _TICKET_CAP else ""))
+    for sym in _tix[:_TICKET_CAP]:
         r = details.get(sym)
         if not r:
             continue
@@ -1150,6 +1163,8 @@ def _premium_impl(symbol: str, dte_target: int = 35, short_delta: float = 0.20,
     next_earn = data["next_earn"]
     if not expiries:
         return {"symbol": symbol, "error": "no options"}
+    if live:
+        spot = _fresh_spot(symbol) or spot
 
     now = pd.Timestamp.now(tz="UTC")
     # Prefer the standard monthly expiry (3rd Friday) in the 20–55 DTE window —
@@ -1374,8 +1389,12 @@ def _render_premium():
                        "premium_no_earnings.csv", "text/csv")
 
     st.divider()
-    st.subheader("Trade tickets")
-    for sym in view["Ticker"].tolist():
+    _tix = view["Ticker"].tolist()
+    _TICKET_CAP = 15
+    st.subheader("Trade tickets"
+                 + (f" — top {_TICKET_CAP} of {len(_tix)} (filter to see others)"
+                    if len(_tix) > _TICKET_CAP else ""))
+    for sym in _tix[:_TICKET_CAP]:
         r = details.get(sym)
         if not r:
             continue

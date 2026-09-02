@@ -20,6 +20,69 @@ import time
 from datetime import date
 
 _CACHE_DIR = os.path.join(os.path.dirname(__file__), "Data", "earnings_iv")
+_HIST_DIR = os.path.join(_CACHE_DIR, "hist")
+_EARN_DIR = os.path.join(_CACHE_DIR, "earn")
+
+
+# --------------------------------------------------------------------------- #
+# Per-ticker disk caches — shared by the dashboard (system py) AND the prefetch
+# (.venv py) AND across dashboard restarts. Parquet/JSON so pandas versions
+# don't matter. History and earnings dates barely move intraday; option chains
+# are NOT cached here (they need to be fresh).
+# --------------------------------------------------------------------------- #
+def cached_history(symbol: str, max_age_h: float = 4.0, retry=None):
+    """1y daily OHLCV as a tz-aware DataFrame. Parquet-cached on disk."""
+    import pandas as pd
+    import yfinance as yf
+    os.makedirs(_HIST_DIR, exist_ok=True)
+    p = os.path.join(_HIST_DIR, f"{symbol.upper()}.parquet")
+    if os.path.exists(p) and (time.time() - os.path.getmtime(p)) < max_age_h * 3600:
+        try:
+            df = pd.read_parquet(p)
+            if not df.empty:
+                return df
+        except Exception:
+            pass
+    fetch = (lambda: yf.Ticker(symbol).history(period="1y", auto_adjust=False))
+    df = retry(fetch) if retry else fetch()
+    if df is not None and not df.empty:
+        keep = [c for c in ("Open", "High", "Low", "Close", "Volume") if c in df.columns]
+        df = df[keep].copy()
+        try:
+            df.to_parquet(p)
+        except Exception:
+            pass
+    return df
+
+
+def cached_earnings_dates(symbol: str, max_age_h: float = 22.0):
+    """Sorted list of tz-aware pandas Timestamps from get_earnings_dates(limit=24).
+    JSON-cached on disk (earnings dates only shift quarterly)."""
+    import pandas as pd
+    import yfinance as yf
+    os.makedirs(_EARN_DIR, exist_ok=True)
+    p = os.path.join(_EARN_DIR, f"{symbol.upper()}.json")
+    if os.path.exists(p) and (time.time() - os.path.getmtime(p)) < max_age_h * 3600:
+        try:
+            with open(p) as f:
+                return [pd.Timestamp(s) for s in json.load(f)]
+        except Exception:
+            pass
+    out = []
+    try:
+        ed = yf.Ticker(symbol).get_earnings_dates(limit=24)
+        if ed is not None and not ed.empty:
+            idx = ed.index
+            idx = idx.tz_convert("UTC") if idx.tz is not None else idx.tz_localize("UTC")
+            out = sorted(idx)
+    except Exception:
+        pass
+    try:
+        with open(p, "w") as f:
+            json.dump([t.isoformat() for t in out], f)
+    except Exception:
+        pass
+    return out
 
 # universe keys understood everywhere in the app
 UNIVERSES = {
