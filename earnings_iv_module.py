@@ -711,11 +711,94 @@ def _live_recheck(sym: str, kind: str, cached: dict):
         rng = max((fresh.get("straddle_pct", 8)) / 100 * fresh["spot"] * 2.2, fresh["spot"] * 0.12)
         st.plotly_chart(_payoff_fig(fs, fresh["spot"], fresh["spot"] - rng, fresh["spot"] + rng, dark),
                         use_container_width=True, key=f"lpf_{kind}_{sym}")
+        _render_plan(fs, fresh["spot"], fresh.get("front_exp") or fresh.get("exp"), mode=kind)
     for reason in fresh.get("reasons", []):
         st.caption("• " + str(reason))
 
 
 _SRC_TAG = {"quote": "", "last": "  ⚠ last-trade (no live bid)", "model": "  ⚠ model price (no market)"}
+
+
+def _manage_plan(strat: dict, spot: float, exp=None, mode: str = "premium") -> list[str]:
+    """Concrete 'what the stock has to do, and when to get out' lines."""
+    legs = strat.get("leg_detail") or []
+    if not legs or not _fin(spot):
+        return []
+    net = float(strat.get("net") or 0.0)
+    kind = strat.get("net_kind", "credit")
+    bes = sorted(float(b) for b in strat.get("breakevens", []) if _fin(b))
+    sells = sorted(l["strike"] for l in legs if l["action"] == "SELL")
+    buys = sorted(l["strike"] for l in legs if l["action"] == "BUY")
+    ml, mp = strat.get("max_loss"), strat.get("max_profit")
+
+    def m(x):  # dollars per 1-lot
+        return f"${x * 100:,.0f}" if _fin(x) else "—"
+
+    L = []
+    if kind == "credit" and len(sells) == 2:                     # iron condor
+        sp, sc = sells[0], sells[-1]
+        L.append(f"**Stay in the money:** stock **holds between ${sp:g} and ${sc:g}** through expiry "
+                 f"→ keep the full {m(net)} credit.")
+        if len(bes) == 2:
+            L.append(f"Net-green anywhere from **${bes[0]:.2f}** to **${bes[-1]:.2f}** (break-evens); "
+                     f"full {m(ml)} loss only past ${buys[0]:g} / ${buys[-1]:g}.")
+    elif kind == "credit" and legs and sells:                    # 1-sided credit spread
+        short, long_ = sells[0], (buys[0] if buys else sells[0])
+        be = bes[0] if bes else short
+        if legs[0]["right"] == "P":                              # bull put
+            L.append(f"**Stay in the money:** stock **closes above ${short:g}** at expiry → keep the full "
+                     f"{m(net)}. Still net-green anywhere **above ${be:.2f}**.")
+            L.append(f"Full {m(ml)} loss only if it **closes below ${long_:g}** (${short-long_:g}-wide spread).")
+        else:                                                    # bear call
+            L.append(f"**Stay in the money:** stock **closes below ${short:g}** at expiry → keep the full "
+                     f"{m(net)}. Still net-green anywhere **below ${be:.2f}**.")
+            L.append(f"Full {m(ml)} loss only if it **closes above ${long_:g}**.")
+    elif kind == "debit" and not sells:                          # long strangle
+        if len(bes) == 2:
+            L.append(f"**Needs a real move:** profit only if the stock is **below ${bes[0]:.2f}** or "
+                     f"**above ${bes[-1]:.2f}** at expiry — it bleeds if it sits still. Risk = the {m(net)} debit.")
+    elif kind == "debit" and buys:                               # debit spread
+        long_, short = buys[0], (sells[0] if sells else buys[0])
+        be = bes[0] if bes else long_
+        if legs[0]["right"] == "C":                              # bull call
+            L.append(f"**Needs to run:** profit if it **closes above ${be:.2f}**; full {m(mp)} once it's "
+                     f"**above ${short:g}**. Risk = the {m(net)} debit.")
+        else:                                                    # bear put
+            L.append(f"**Needs to drop:** profit if it **closes below ${be:.2f}**; full {m(mp)} once it's "
+                     f"**below ${short:g}**. Risk = the {m(net)} debit.")
+
+    # ── exits ──
+    if kind == "credit":
+        L.append(f"**Take profit:** buy the spread back near **${net * 0.5:.2f}** (≈50% of the credit) → "
+                 f"bank ~{m(net * 0.5)}. Comes well before expiry as it drifts your way + theta decays.")
+        stk = f"${sells[0]:g}" + (f" / ${sells[-1]:g}" if len(sells) == 2 else "")
+        L.append(f"**Cut it:** if the spread value roughly **doubles to ${net * 2:.2f}** "
+                 f"(−{m(net)}/lot) — or the stock trades through {stk} (the short strike"
+                 + ("s)." if len(sells) == 2 else ")."))
+    else:
+        after = ("the day after the print — don't hold for theta bleed"
+                 if mode == "earnings" else "into the first sharp move your way")
+        L.append(f"**Take profit:** ~50–75% of max, or {after}.")
+        L.append(f"**Cut it:** the {m(net)} debit is the whole risk — bail if the move hasn't started by expiry week.")
+
+    if exp is not None:
+        try:
+            d21 = pd.Timestamp(exp) - pd.Timedelta(days=21)
+            if d21.normalize() > pd.Timestamp.now().normalize():
+                L.append(f"**Time stop:** close by **{d21.strftime('%b %d')}** (21 DTE) regardless — "
+                         f"gamma risk rises into the last 3 weeks.")
+        except Exception:
+            pass
+    return L
+
+
+def _render_plan(strat, spot, exp=None, mode="premium"):
+    lines = _manage_plan(strat, spot, exp, mode)
+    if not lines:
+        return
+    st.markdown("**📐 Plan**")
+    for ln in lines:
+        _md("- " + ln)
 
 
 def _render_legs(strat: dict):
@@ -887,9 +970,10 @@ def _render_single():
         st.plotly_chart(_payoff_fig(strat, r['spot'], r['spot'] - rng, r['spot'] + rng, dark),
                         use_container_width=True)
 
+    _render_plan(strat, r['spot'], r.get('front_exp'), mode="earnings")
     if "SELL" in verdict:
-        st.caption("Exit plan: close the day after the print once IV has crushed — don't hold for "
-                   "the last few dollars of theta. Risk ≤ 1–2% of account per event.")
+        st.caption("Around earnings, IV crush does most of the work in the first day — take the "
+                   "50%-of-credit exit fast rather than holding for the last of the theta.")
     _backtest_note("earnings")
     _footer()
 
@@ -1076,6 +1160,7 @@ def _render_scanner():
                 rng = max(r['straddle_pct'] / 100 * r['spot'] * 2.2, r['spot'] * 0.12)
                 st.plotly_chart(_payoff_fig(strat, r['spot'], r['spot'] - rng, r['spot'] + rng, dark),
                                 use_container_width=True, key=f"pf_{sym}")
+            _render_plan(strat, r['spot'], r.get('front_exp'), mode="earnings")
 
     if meta and meta.get("errors"):
         with st.expander(f"Skipped {len(meta['errors'])} names in last scan"):
@@ -1263,7 +1348,6 @@ def _premium_impl(symbol: str, dte_target: int = 35, short_delta: float = 0.20,
         f"Credit ${credit:.2f} on ${max_loss + credit:.0f}-wide → {ror*100:.0f}% return on risk"
         + (f", {pop*100:.0f}% est. PoP" if _fin(pop) else "")
         + f" (~{ann_ror*100:.0f}%/yr gross if repeated, before losing cycles).",
-        "→ Manage: close at ~50% of max profit or 21 DTE, whichever comes first (tastylive).",
     ]
 
     # gates for a genuinely "good premium, low-risk" idea
@@ -1421,6 +1505,7 @@ def _render_premium():
                 rng = max(r["straddle_pct"] / 100 * r["spot"] * 2.4, r["spot"] * 0.14)
                 st.plotly_chart(_payoff_fig(s, r["spot"], r["spot"] - rng, r["spot"] + rng, dark),
                                 use_container_width=True, key=f"pp_{sym}")
+            _render_plan(s, r["spot"], r.get("exp"), mode="premium")
     if meta and meta.get("skipped"):
         with st.expander(f"{len(meta['skipped'])} names skipped (earnings in window / no clean spread)"):
             st.caption(", ".join(meta["skipped"]))
