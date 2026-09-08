@@ -371,15 +371,12 @@ def _append_day_log(entry: Dict) -> None:
 # ── VIX regime ────────────────────────────────────────────────────────────────
 
 def _get_vix() -> float:
-    """Return current VIX level. Returns 20.0 on failure (neutral default)."""
+    """Return current VIX level. Shared source: market_context.get_vix()."""
     try:
-        import yfinance as yf
-        vix = yf.download("^VIX", period="5d", progress=False, auto_adjust=True)
-        if not vix.empty:
-            return float(vix["Close"].squeeze().iloc[-1])
+        from market_context import get_vix
+        return get_vix()["level"]
     except Exception:
-        pass
-    return 20.0
+        return 20.0
 
 
 # ── Entry scan ────────────────────────────────────────────────────────────────
@@ -482,6 +479,10 @@ def _run_entry_scan(client, cfg: dict, state: Dict) -> None:
 
     acct = _get_account(client)
     portfolio_value = acct["equity"]
+    # Size off cash, not equity/buying_power — buying_power includes margin,
+    # and equity counts capital already tied up in open positions. No
+    # trading here should ever draw on margin.
+    cash_remaining = acct["cash"]
 
     for _, row in signals_df.iterrows():
         underlying  = row["Symbol"]
@@ -515,12 +516,23 @@ def _run_entry_scan(client, cfg: dict, state: Dict) -> None:
         while n_contracts > 1 and n_contracts * px * CONTRACTS_PER_100 > max_cost:
             n_contracts -= 1
 
+        # Never draw on margin — shrink to what remaining cash can cover,
+        # skip entirely if even 1 contract doesn't fit.
+        while n_contracts > 1 and n_contracts * px * CONTRACTS_PER_100 > cash_remaining:
+            n_contracts -= 1
+        cost_est = n_contracts * px * CONTRACTS_PER_100
+        if cost_est > cash_remaining:
+            log.warning("  ⚠️  Skipping %s — est cost $%.0f exceeds available cash $%.0f (no margin)",
+                        underlying, cost_est, cash_remaining)
+            continue
+
         log.info("  Sizing: %d contracts @ est $%.2f  (budget $%.0f)",
                  n_contracts, px, budget)
 
         result = place_option_buy(client, opt_symbol, n_contracts)
 
         if result["ok"]:
+            cash_remaining -= cost_est
             log.info("  ✅  ORDER PLACED  %s  qty=%d  order_id=%s",
                      opt_symbol, n_contracts, result["order_id"])
 
@@ -708,7 +720,10 @@ def _check_exits(client, cfg: dict, state: Dict) -> None:
             "order_id":       result.get("order_id", ""),
         })
 
-        _remove_position(state, sym)
+        if result["ok"]:
+            _remove_position(state, sym)
+        else:
+            log.warning("  ⚠️  Keeping %s in tracked state — sell failed, will retry next cycle", sym)
 
     _save_state(state)
 

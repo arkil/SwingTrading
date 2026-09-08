@@ -78,6 +78,33 @@ class Strategy:
                        1.0,
         )
 
+    # ── Walk-forward slicing ─────────────────────────────────────────────────
+
+    def slice(self, start: Optional[str], end: Optional[str]) -> "Strategy":
+        """
+        Return a new Strategy whose _arrays/_feats are date-sliced to
+        [start, end] (inclusive, ISO date strings; None = open-ended).
+        Used by walkforward.py to build train/test folds without re-fetching
+        or re-computing features from scratch.
+        """
+        if self._arrays is None or self._feats is None:
+            raise RuntimeError("Call load() and compute() first")
+
+        import pandas as pd
+        dates = pd.to_datetime(self._arrays["dates"])
+        start_ts = pd.Timestamp(start) if start else dates.min()
+        end_ts   = pd.Timestamp(end) if end else dates.max()
+        mask = np.asarray((dates >= start_ts) & (dates <= end_ts))
+
+        sliced = Strategy(self.cfg)
+        sliced._arrays = {
+            k: (v[mask] if k == "dates" else (v[mask, :] if v.ndim == 2 else v))
+            for k, v in self._arrays.items()
+        }
+        sliced._feats = {k: v[mask, :] for k, v in self._feats.items()}
+        sliced._spy_close = self._spy_close[mask]
+        return sliced
+
     # ── Signals ───────────────────────────────────────────────────────────────
 
     def get_signals(

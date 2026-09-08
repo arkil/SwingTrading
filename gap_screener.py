@@ -30,9 +30,14 @@ GAP FILL TRACKER
   • For gaps from up to `lookback_days` ago, shows whether price has since filled the gap
   • "Fill %" = how much of the gap has been retraced by current price
 
-STOPS & TARGETS
-  • Gap Up  long:  Stop = gap low (prev close), Target = gap close + 2.0 × gap size
-  • Gap Down short: Stop = gap high (prev close), Target = gap close − 2.0 × gap size
+TRADE BIAS
+  • BREAKAWAY / CONTINUATION / COMMON: trade WITH the gap direction
+      - Gap Up   -> LONG,  Stop = prev close,  Target = close + 2.0 × gap size
+      - Gap Down -> SHORT, Stop = prev close,  Target = close − 2.0 × gap size
+  • EXHAUSTION: trade AGAINST the gap (fade), since follow-through is unreliable
+      - Gap Up   -> SHORT, Stop = gap-day high, Target = prev close (gap fill)
+      - Gap Down -> LONG,  Stop = gap-day low,  Target = prev close (gap fill)
+  • R/R is computed from the actual Entry/Stop/Target levels above (not fixed at 2.0)
 """
 
 import pandas as pd
@@ -198,12 +203,40 @@ def detect_gaps(
         if direction == "UP":
             # Filled if current_price dropped back to prev_close
             fill_pct = max(0, min(100, (gap_top - current_price) / gap_size * 100)) if gap_size > 0 else 0
-            stop = round(prev_close, 2)
-            target = round(close_price + 2.0 * abs(gap_pct) / 100 * prev_close, 2)
         else:
             fill_pct = max(0, min(100, (current_price - gap_bottom) / gap_size * 100)) if gap_size > 0 else 0
-            stop = round(prev_close, 2)
-            target = round(close_price - 2.0 * abs(gap_pct) / 100 * prev_close, 2)
+
+        # EXHAUSTION gaps are faded (traded opposite the gap direction), per the
+        # scanner's own guidance ("fade or avoid"). BREAKAWAY/CONTINUATION/COMMON
+        # are traded with the gap. Stop sits beyond the gap-day extreme for fades,
+        # or at the gap-invalidation level (prev close) for with-gap trades.
+        if gap_type == "EXHAUSTION":
+            trade_bias = "SHORT" if direction == "UP" else "LONG"
+        else:
+            trade_bias = "LONG" if direction == "UP" else "SHORT"
+
+        entry = close_price
+        if trade_bias == "LONG":
+            if gap_type == "EXHAUSTION":
+                stop = round(low, 2)
+                target = round(prev_close, 2)
+            else:
+                stop = round(prev_close, 2)
+                target = round(close_price + 2.0 * gap_size, 2)
+        else:
+            if gap_type == "EXHAUSTION":
+                stop = round(high, 2)
+                target = round(prev_close, 2)
+            else:
+                stop = round(prev_close, 2)
+                target = round(close_price - 2.0 * gap_size, 2)
+
+        # Guard against near-zero risk (Entry ~= Stop, common on penny stocks /
+        # low-volatility gaps) blowing up into an absurd R/R ratio. Require the
+        # stop distance to be at least 0.25% of entry for R/R to be meaningful.
+        risk = abs(entry - stop)
+        reward = abs(target - entry)
+        rr = round(reward / risk, 2) if risk > 0 and entry > 0 and risk / entry >= 0.0025 else None
 
         # Body quality: close near high = strong gap day, close near low = weak
         bar_range = high - low
@@ -224,9 +257,11 @@ def detect_gaps(
             "Vol vs Avg": round(vol_r, 2),
             "Body Quality %": round(body_quality, 1),
             "Gap Fill %": round(fill_pct, 1),
+            "Trade Bias": trade_bias,
+            "Entry": round(entry, 2),
             "Stop": stop,
             "Target": target,
-            "R/R": round(2.0, 2),
+            "R/R": rr,
             "RSI": round(df["rsi14"].iloc[i], 1) if pd.notna(df["rsi14"].iloc[i]) else None,
             "EMA50": "ABOVE" if close_price > df["ema50"].iloc[i] else "BELOW",
         })
@@ -269,15 +304,18 @@ def run_gap_screener(
     start = end - timedelta(days=lookback_days + 60)
 
     # Batch download all tickers in one request (yfinance threads internally)
-    raw_all = yf.download(
-        tickers,
-        start=start,
-        end=end,
-        progress=False,
-        auto_adjust=True,
-        group_by="ticker",
-        threads=True,
-    )
+    try:
+        raw_all = yf.download(
+            tickers,
+            start=start,
+            end=end,
+            progress=False,
+            auto_adjust=True,
+            group_by="ticker",
+            threads=True,
+        )
+    except Exception:
+        return pd.DataFrame()
 
     results = []
     for ticker in tickers:
@@ -323,15 +361,18 @@ def run_live_gap_screener(
     if tickers is None:
         tickers = DEFAULT_TICKERS
 
-    raw_all = yf.download(
-        tickers,
-        period="25d",
-        interval="1d",
-        progress=False,
-        auto_adjust=True,
-        group_by="ticker",
-        threads=True,
-    )
+    try:
+        raw_all = yf.download(
+            tickers,
+            period="25d",
+            interval="1d",
+            progress=False,
+            auto_adjust=True,
+            group_by="ticker",
+            threads=True,
+        )
+    except Exception:
+        return pd.DataFrame()
 
     rows = []
     for ticker in tickers:

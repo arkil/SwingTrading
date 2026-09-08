@@ -703,9 +703,34 @@ def generate_daily_alerts(
         return pd.DataFrame()
 
     out = pd.DataFrame(rows)
-    out.sort_values(["Score", "R/R"], ascending=False, inplace=True)
+    _add_conviction_score(out)
+    out.sort_values(["Conviction Score", "Score", "R/R"], ascending=False, inplace=True)
     out.reset_index(drop=True, inplace=True)
+    out["Conviction Rank"] = range(1, len(out) + 1)
     return out
+
+
+def _add_conviction_score(df: pd.DataFrame) -> None:
+    """
+    Weighted composite (0-100) blending signal strength, reward/risk, relative
+    strength, trend quality, volume confirmation and Minervini template fit —
+    a single ranking number so the top N alerts by conviction can be picked
+    consistently across the dashboard and the live trader, independent of
+    the STRONG/HIGH/WATCH score-threshold buckets.
+
+    Weights: Score 35% | R/R 20% | RS 15% | ADX 15% | Vol Ratio 10% | Minervini 5%
+    """
+    score_n = (df["Score"].clip(0, 14) / 14)
+    rr_n    = (df["R/R"].clip(0, 4) / 4)
+    rs_n    = (df["RS"].clip(0, 100) / 100)
+    adx_n   = (df["ADX"].clip(0, 50) / 50)
+    vol_n   = (df["Vol Ratio"].clip(0, 3) / 3)
+    mini_n  = (df["Minervini"].clip(0, 8) / 8)
+
+    df["Conviction Score"] = (
+        100 * (0.35 * score_n + 0.20 * rr_n + 0.15 * rs_n
+               + 0.15 * adx_n + 0.10 * vol_n + 0.05 * mini_n)
+    ).round(1)
 
 
 def generate_exit_signals(

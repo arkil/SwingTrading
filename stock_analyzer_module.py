@@ -117,13 +117,48 @@ SA_SECTOR_PEERS = {
 
 # ── DATA FETCHING ──────────────────────────────────────────────────────────────
 
+def _sa_clean_hist(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    yfinance sometimes includes a row for the current calendar day with NaN
+    OHLCV before that day's trading data has actually posted (e.g. right
+    after midnight ET, before the session opens — confirmed live: AMD/MSFT
+    both showed today's Close as NaN). Any code that blindly takes
+    `.iloc[-1]` on an uncleaned frame then reads "today's price" as NaN,
+    which silently cascades into every downstream calc (DCF upside, peer
+    3-month returns, chart price, position sizing). Drop it once at the
+    source so every consumer gets a real last row.
+    """
+    if df is None or df.empty:
+        return df
+    return df.dropna(subset=["Close"])
+
+
 @st.cache_data(ttl=300)
 def sa_get_stock_data(ticker: str):
     stock = yf.Ticker(ticker)
-    info = dict(stock.info)
-    hist_6m = stock.history(period="6mo")
-    hist_1y = stock.history(period="1y")
-    hist_2y = stock.history(period="2y")
+    try:
+        info = dict(stock.info or {})
+    except Exception:
+        info = {}
+
+    # `.info` intermittently comes back with sharesOutstanding/marketCap as
+    # None even for large, liquid tickers (seen live for AMD) — `fast_info`
+    # is a separate, more reliable yfinance endpoint for these two fields.
+    # Filling the gap here, once, protects every downstream per-share
+    # calculation (DCF, EPS, etc.) instead of each one needing its own fallback.
+    if not info.get("sharesOutstanding") or not info.get("marketCap"):
+        try:
+            fi = stock.fast_info
+            if not info.get("sharesOutstanding") and fi.get("shares"):
+                info["sharesOutstanding"] = fi["shares"]
+            if not info.get("marketCap") and fi.get("market_cap"):
+                info["marketCap"] = fi["market_cap"]
+        except Exception:
+            pass
+
+    hist_6m = _sa_clean_hist(stock.history(period="6mo"))
+    hist_1y = _sa_clean_hist(stock.history(period="1y"))
+    hist_2y = _sa_clean_hist(stock.history(period="2y"))
     return info, hist_6m, hist_1y, hist_2y
 
 
@@ -138,15 +173,18 @@ def sa_get_financials(ticker: str):
 @st.cache_data(ttl=300)
 def sa_get_spy_data():
     spy = yf.Ticker("SPY")
-    return spy.history(period="1y")
+    return _sa_clean_hist(spy.history(period="1y"))
 
 
 @st.cache_data(ttl=600)
 def sa_get_sector_data(etf_ticker: str, peers: list, current_ticker: str):
     results = {}
     etf = yf.Ticker(etf_ticker)
-    results["etf_hist"] = etf.history(period="6mo")
-    results["etf_info"] = etf.info
+    results["etf_hist"] = _sa_clean_hist(etf.history(period="6mo"))
+    try:
+        results["etf_info"] = etf.info
+    except Exception:
+        results["etf_info"] = {}
 
     peer_data = {}
     for p in peers:
@@ -154,7 +192,7 @@ def sa_get_sector_data(etf_ticker: str, peers: list, current_ticker: str):
             continue
         try:
             t = yf.Ticker(p)
-            h = t.history(period="3mo")
+            h = _sa_clean_hist(t.history(period="3mo"))
             if not h.empty:
                 ret = (h["Close"].iloc[-1] / h["Close"].iloc[0] - 1) * 100
                 ma50 = h["Close"].rolling(50).mean().dropna()
@@ -574,20 +612,41 @@ def _sa_cf_row(df, *names):
     return pd.Series(dtype=float)
 
 
+def _sa_shares_outstanding(info, price=None):
+    """
+    Robust shares-outstanding lookup. Never falls back to a bogus "1 share"
+    — dividing company-wide dollar figures (FCF, cash, debt) by 1 share
+    makes every per-share DCF number explode to the company's full market
+    cap. Returns None if truly undeterminable, so callers can bail out of
+    the per-share math instead of showing a nonsense valuation.
+    """
+    shares = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
+    if shares:
+        return float(shares)
+    mkt_cap = info.get("marketCap")
+    px = price if price else (info.get("currentPrice") or info.get("regularMarketPrice"))
+    if mkt_cap and px:
+        return float(mkt_cap) / float(px)
+    return None
+
+
 def _sa_dcf_wacc(info, price):
-    shares_out = info.get("sharesOutstanding") or 1
+    shares_out = _sa_shares_outstanding(info, price)
     beta       = max(info.get("beta") or 1.0, 0.5)
     total_debt = info.get("totalDebt") or 0
-    mkt_cap    = info.get("marketCap") or (price * shares_out)
+    mkt_cap    = info.get("marketCap") or (price * shares_out if shares_out else None)
     rf, erp    = 0.045, 0.055
     cost_equity = rf + beta * erp
-    dw = total_debt / (mkt_cap + total_debt) if (mkt_cap + total_debt) else 0
+    # No reliable market cap → can't weight by debt; fall back to pure cost of equity.
+    dw = total_debt / (mkt_cap + total_debt) if mkt_cap and (mkt_cap + total_debt) else 0
     wacc = (1 - dw) * cost_equity + dw * (0.05 * 0.79)
     return round(max(0.07, min(0.18, wacc)), 4)
 
 
 def _sa_smart_fcf(info, cashflow_df):
-    shares = info.get("sharesOutstanding") or 1
+    shares = _sa_shares_outstanding(info)
+    if not shares:
+        return None
     cf     = cashflow_df
 
     op_cf_s = _sa_cf_row(cf, "Operating Cash Flow", "Cash Flow From Continuing Operating Activities")
@@ -714,7 +773,9 @@ def sa_calc_dcf(info, price, cashflow_df=None, g1_pct=None, g2_pct=None, wacc_pc
     fcf_ps      = fcf_data["fcf_ps"]
     capex_ratio = fcf_data["capex_ratio"]
 
-    shares_out  = info.get("sharesOutstanding") or 1
+    shares_out  = _sa_shares_outstanding(info, price)
+    if not shares_out:
+        return None
     total_debt  = info.get("totalDebt") or 0
     total_cash  = info.get("totalCash") or 0
     net_cash_ps = (total_cash - total_debt) / shares_out
@@ -1429,7 +1490,9 @@ def render_stock_analyzer():
         sa_tbl_row("Price/Sales",    f"{ps:.1f}"  if ps  else "N/A")
         sa_tbl_row("Price/Book",     f"{pb:.1f}"  if pb  else "N/A")
         sa_tbl_row("ROE",            f"{roe:.1f}%",  "#16a34a" if roe > 15 else "#dc2626")
+        sa_tbl_row("ROA",            f"{roa:.1f}%",  "#16a34a" if roa > 5 else "#dc2626")
         sa_tbl_row("Gross Margin",   f"{gm:.1f}%",   "#16a34a" if gm > 40 else None)
+        sa_tbl_row("Operating Margin", f"{om:.1f}%", "#16a34a" if om > 15 else "#dc2626" if om < 0 else None)
         sa_tbl_row("Net Margin",     f"{nm:.1f}%",   "#16a34a" if nm > 10 else "#dc2626" if nm < 0 else None)
         sa_tbl_row("Debt/Equity",    f"{de:.0f}%"  if de else "N/A",
                    "#dc2626" if de > 150 else "#16a34a" if de < 50 else None)
@@ -1453,22 +1516,54 @@ def render_stock_analyzer():
         with tv_c3:
             tv_sr_order = st.slider("S/R Sensitivity", 3, 15, 5, key=f"tv_sr_{ticker}")
 
+        st.caption(
+            "📖 **Reading this chart:** candles = price (green = up day, red = down day) · "
+            "the thin colored lines below are moving averages (trend direction) · "
+            "the bottom panel is MACD (momentum — green/red bars show whether momentum is "
+            "building or fading). Turn on more overlays below only once the clean view makes sense — "
+            "each one adds more lines on top of price."
+        )
+
         ov_c1, ov_c2, ov_c3 = st.columns(3)
         with ov_c1:
-            st.markdown("**Overlays**")
-            tv_emas  = st.checkbox("EMAs 9/21/50/200",    value=True,  key=f"tv_ema_{ticker}")
-            tv_smas  = st.checkbox("SMAs 20/50/200",       value=False, key=f"tv_sma_{ticker}")
-            tv_bb    = st.checkbox("Bollinger Bands",      value=True,  key=f"tv_bb_{ticker}")
-            tv_vwap  = st.checkbox("VWAP",                 value=True,  key=f"tv_vwap_{ticker}")
+            st.markdown("**Overlays** — trend lines on price")
+            tv_emas  = st.checkbox("EMAs 9/21/50/200",    value=True,  key=f"tv_ema_{ticker}",
+                                   help="4 moving averages of price, weighted toward recent bars. "
+                                        "Price above all 4, stacked short-to-long, = strong uptrend.")
+            tv_smas  = st.checkbox("SMAs 20/50/200",       value=False, key=f"tv_sma_{ticker}",
+                                   help="Simple moving averages — similar to EMAs but weight all days "
+                                        "equally, so they react slower. Off by default to avoid doubling "
+                                        "up on trend lines with EMAs.")
+            tv_bb    = st.checkbox("Bollinger Bands",      value=False, key=f"tv_bb_{ticker}",
+                                   help="A band around price showing typical volatility range. Price "
+                                        "pressing the outer band = extended; band squeezing tight = a "
+                                        "big move may be coming.")
+            tv_vwap  = st.checkbox("VWAP",                 value=False, key=f"tv_vwap_{ticker}",
+                                   help="Volume-Weighted Average Price — where most trading actually "
+                                        "happened. Most useful on shorter/intraday timeframes.")
         with ov_c2:
-            st.markdown("**Advanced**")
-            tv_st    = st.checkbox("Supertrend (3×ATR)",   value=True,  key=f"tv_st_{ticker}")
-            tv_ichi  = st.checkbox("Ichimoku Cloud",        value=False, key=f"tv_ichi_{ticker}")
+            st.markdown("**Advanced** — trend-following signals")
+            tv_st    = st.checkbox("Supertrend (3×ATR)",   value=False, key=f"tv_st_{ticker}",
+                                   help="A trailing stop-style line that flips green (bullish) or red "
+                                        "(bearish) with the trend. Green segment = price is above it.")
+            tv_ichi  = st.checkbox("Ichimoku Cloud",        value=False, key=f"tv_ichi_{ticker}",
+                                   help="A Japanese charting system — a shaded 'cloud' showing trend "
+                                        "and support/resistance at once. Dense — turn on only if you "
+                                        "already use Ichimoku.")
         with ov_c3:
-            st.markdown("**Levels**")
-            tv_sr    = st.checkbox("Support/Resistance",    value=True,  key=f"tv_sr2_{ticker}")
-            tv_piv   = st.checkbox("Pivot Points",          value=True,  key=f"tv_piv_{ticker}")
-            tv_fib   = st.checkbox("Fibonacci Retracement", value=False, key=f"tv_fib_{ticker}")
+            st.markdown("**Levels** — horizontal price lines")
+            tv_sr    = st.checkbox("Support/Resistance",    value=False, key=f"tv_sr2_{ticker}",
+                                   help="Auto-detected price levels (labeled ▶R / ▶S) where this stock's "
+                                        "own price history has repeatedly reversed.")
+            tv_piv   = st.checkbox("Pivot Points",          value=False, key=f"tv_piv_{ticker}",
+                                   help="Classic floor-trader formula (PP = pivot, R1-R3 = resistance "
+                                        "targets above, S1-S3 = support targets below), recalculated "
+                                        "from the prior period's high/low/close. A different method from "
+                                        "Support/Resistance above — turn on one at a time to avoid "
+                                        "overlapping lines.")
+            tv_fib   = st.checkbox("Fibonacci Retracement", value=False, key=f"tv_fib_{ticker}",
+                                   help="Horizontal lines at common retracement ratios (23.6%, 38.2%, "
+                                        "50%, 61.8%) of the recent swing — potential pullback support.")
 
         with st.spinner("Building technical chart…"):
             tv_df = _tv_fetch(ticker, tv_period, tv_interval)
@@ -1560,10 +1655,17 @@ def render_stock_analyzer():
     _dcf_probe = sa_calc_dcf(info, price, cashflow_df=cashflow_df)
 
     if _dcf_probe is None:
-        st.warning(
-            f"DCF requires positive Free Cash Flow. {ticker} currently has negative/zero FCF — "
-            "DCF not applicable. Consider EV/Revenue or P/S multiples instead."
-        )
+        if not _sa_shares_outstanding(info, price):
+            st.warning(
+                f"DCF not available — shares outstanding data is missing for {ticker} "
+                "(a data-provider gap, not a real negative). Per-share valuation can't be computed "
+                "without it."
+            )
+        else:
+            st.warning(
+                f"DCF requires positive Free Cash Flow. {ticker} currently has negative/zero FCF — "
+                "DCF not applicable. Consider EV/Revenue or P/S multiples instead."
+            )
     else:
         with st.expander("⚙️  Adjust DCF Assumptions", expanded=False):
             sl1, sl2, sl3 = st.columns(3)
@@ -1683,7 +1785,7 @@ def render_stock_analyzer():
         fcf_ps      = dcf["fcf_per_share"]
         total_debt  = info.get("totalDebt") or 0
         total_cash  = info.get("totalCash") or 0
-        shares_out  = info.get("sharesOutstanding") or 1
+        shares_out  = _sa_shares_outstanding(info, price) or 1
         net_cash_ps = (total_cash - total_debt) / shares_out
         sens_html = sa_dcf_sensitivity_table(fcf_ps, net_cash_ps, user_g1, user_g2, user_wacc, price)
         st.markdown(f'<div style="overflow-x:auto">{sens_html}</div>', unsafe_allow_html=True)

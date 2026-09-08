@@ -75,9 +75,41 @@ def backtest_ticker(
     step: int = 3,
     initial_capital: float = 10_000.0,
     risk_pct: float = 0.01,
+    buy_pyramid: bool = False,
+    dynamic_stop_pct: float = 2.0,
+    sell_mode: str = "runner",
 ) -> Tuple[List[Trade], List[float]]:
     """
     Walk-forward backtest on a single ticker.
+
+    buy_pyramid:       BUY-only. When True, replaces the single-shot
+                       exit-at-first-level model with scale-in pyramiding on
+                       the way to T1 (not at T1/T2 themselves):
+                         - price reaches 1/3 of the way from entry to T1
+                           -> add another leg, same $ capital as entry
+                         - price reaches 2/3 of the way from entry to T1
+                           -> add another leg, same $ capital again
+                       The buy/add side is identical across all sell_mode
+                       values below. Only what happens at T1/T2/T3 changes.
+                       False (default) preserves the original single-exit
+                       behavior: whichever of Stop/T3/T2/T1 is touched first
+                       closes the entire trade.
+    dynamic_stop_pct:  % below the T1 price the stop moves to once T1 is
+                       reached (only used when buy_pyramid=True).
+    sell_mode:         Only used when buy_pyramid=True. Controls what the
+                       sell side does at T1/T2/T3:
+                         "runner"          - no selling at T1/T2. T1 only
+                                             arms a dynamic stop
+                                             (dynamic_stop_pct % below T1)
+                                             protecting the whole position.
+                                             T2 has no effect. Sell 100% at T3.
+                         "all_at_t1"       - sell the entire accumulated
+                                             position the moment T1 is
+                                             touched. T2/T3 never seen.
+                         "scale_50_25_25"  - sell 50% of the position at T1
+                                             (and arm the dynamic stop for
+                                             the rest), 25% at T2, final 25%
+                                             at T3.
 
     Returns (trades, equity_curve).
     equity_curve is bar-by-bar portfolio value.
@@ -124,66 +156,199 @@ def backtest_ticker(
             exit_reason: str = "MAX_HOLD"
             exit_idx:    int = min(entry_idx + max_hold, n - 1)
 
-            for j in range(entry_idx + 1, min(entry_idx + max_hold + 1, n)):
-                bar = df_full.iloc[j]
+            pyramid = direction == "BUY" and buy_pyramid
 
-                if direction == "BUY":
-                    # Stop hit (low pierces stop)
-                    if bar["Low"] <= stop:
-                        exit_price  = stop
-                        exit_reason = "STOP"
-                        exit_idx    = j
-                        break
-                    # Targets (high reaches level)
-                    elif bar["High"] >= t3:
-                        exit_price  = t3
-                        exit_reason = "T3"
-                        exit_idx    = j
-                        break
-                    elif bar["High"] >= t2:
-                        exit_price  = t2
-                        exit_reason = "T2"
-                        exit_idx    = j
-                        break
-                    elif bar["High"] >= t1:
-                        exit_price  = t1
-                        exit_reason = "T1"
-                        exit_idx    = j
-                        break
-                else:  # SHORT
-                    if bar["High"] >= stop:
-                        exit_price  = stop
-                        exit_reason = "STOP"
-                        exit_idx    = j
-                        break
-                    elif bar["Low"] <= t3:
-                        exit_price  = t3
-                        exit_reason = "T3"
-                        exit_idx    = j
-                        break
-                    elif bar["Low"] <= t2:
-                        exit_price  = t2
-                        exit_reason = "T2"
-                        exit_idx    = j
-                        break
-                    elif bar["Low"] <= t1:
-                        exit_price  = t1
-                        exit_reason = "T1"
+            if pyramid:
+                # Scale-in on the way to T1 (not at T1/T2 themselves) — same
+                # for every sell_mode:
+                #   1/3 of the way from entry to T1 -> add a leg, same $ capital
+                #   2/3 of the way from entry to T1 -> add a leg, same $ capital
+                add_level_1  = entry_price + (1 / 3) * (t1 - entry_price)
+                add_level_2  = entry_price + (2 / 3) * (t1 - entry_price)
+
+                total_shares = float(shares)   # grows as legs are added
+                total_cost   = entry_price * shares
+                leg_notional = entry_price * shares  # "same capital" per add
+                current_stop = stop
+                added_leg1   = False
+                added_leg2   = False
+                stop_armed   = False
+
+                remaining_shares    = total_shares  # shares still held (post partial sells)
+                realized_proceeds   = 0.0           # $ banked from partial sells so far
+                sold_t1             = False
+                sold_t2             = False
+
+                def _add_leg_1():
+                    nonlocal total_shares, total_cost, added_leg1, remaining_shares
+                    if not added_leg1:
+                        add_shares      = leg_notional / add_level_1
+                        total_shares   += add_shares
+                        remaining_shares += add_shares
+                        total_cost     += add_shares * add_level_1
+                        added_leg1      = True
+
+                def _add_leg_2():
+                    nonlocal total_shares, total_cost, added_leg2, remaining_shares
+                    if not added_leg2:
+                        add_shares      = leg_notional / add_level_2
+                        total_shares   += add_shares
+                        remaining_shares += add_shares
+                        total_cost     += add_shares * add_level_2
+                        added_leg2      = True
+
+                for j in range(entry_idx + 1, min(entry_idx + max_hold + 1, n)):
+                    bar = df_full.iloc[j]
+
+                    # Stop check first, using whatever stop currently applies
+                    if bar["Low"] <= current_stop:
+                        realized_proceeds += remaining_shares * current_stop
+                        remaining_shares   = 0.0
+                        exit_price  = current_stop
+                        exit_reason = "TRAIL_STOP" if stop_armed else "STOP"
                         exit_idx    = j
                         break
 
-            if exit_price is None:
-                exit_price = float(df_full["Close"].iloc[exit_idx])
+                    # Buy-side adds (identical for every sell_mode)
+                    if bar["High"] >= add_level_2 and not added_leg2:
+                        _add_leg_1()
+                        _add_leg_2()
+                    elif bar["High"] >= add_level_1 and not added_leg1:
+                        _add_leg_1()
 
-            # P&L
-            raw_pnl = (
-                (exit_price - entry_price) * shares if direction == "BUY"
-                else (entry_price - exit_price) * shares
-            )
-            pnl_pct = (
-                (exit_price - entry_price) / entry_price * 100 if direction == "BUY"
-                else (entry_price - exit_price) / entry_price * 100
-            )
+                    if sell_mode == "all_at_t1":
+                        if bar["High"] >= t1:
+                            realized_proceeds += remaining_shares * t1
+                            remaining_shares   = 0.0
+                            exit_price  = t1
+                            exit_reason = "T1_ALL"
+                            exit_idx    = j
+                            break
+
+                    elif sell_mode == "scale_50_25_25":
+                        if bar["High"] >= t3:
+                            if not sold_t1:
+                                sell_qty = 0.5 * total_shares
+                                realized_proceeds += sell_qty * t1
+                                remaining_shares  -= sell_qty
+                                sold_t1 = True
+                            if not sold_t2:
+                                sell_qty = 0.25 * total_shares
+                                realized_proceeds += sell_qty * t2
+                                remaining_shares  -= sell_qty
+                                sold_t2 = True
+                            realized_proceeds += remaining_shares * t3
+                            remaining_shares   = 0.0
+                            exit_price  = t3
+                            exit_reason = "T3_FINAL"
+                            exit_idx    = j
+                            break
+                        elif bar["High"] >= t2 and not sold_t2:
+                            if not sold_t1:
+                                sell_qty = 0.5 * total_shares
+                                realized_proceeds += sell_qty * t1
+                                remaining_shares  -= sell_qty
+                                sold_t1 = True
+                                stop_armed   = True
+                                current_stop = t1 * (1 - dynamic_stop_pct / 100)
+                            sell_qty = 0.25 * total_shares
+                            realized_proceeds += sell_qty * t2
+                            remaining_shares  -= sell_qty
+                            sold_t2 = True
+                        elif bar["High"] >= t1 and not sold_t1:
+                            sell_qty = 0.5 * total_shares
+                            realized_proceeds += sell_qty * t1
+                            remaining_shares  -= sell_qty
+                            sold_t1 = True
+                            stop_armed   = True
+                            current_stop = t1 * (1 - dynamic_stop_pct / 100)
+
+                    else:  # "runner" (default): no selling at T1/T2, dynamic stop arms at T1
+                        if bar["High"] >= t3:
+                            exit_price  = t3
+                            exit_reason = "T3_ALL"
+                            exit_idx    = j
+                            realized_proceeds += remaining_shares * t3
+                            remaining_shares   = 0.0
+                            break
+                        elif bar["High"] >= t1 and not stop_armed:
+                            stop_armed   = True
+                            current_stop = t1 * (1 - dynamic_stop_pct / 100)
+
+                if exit_price is None:
+                    # MAX_HOLD: liquidate whatever remains at the final close
+                    close_price = float(df_full["Close"].iloc[exit_idx])
+                    realized_proceeds += remaining_shares * close_price
+                    exit_price = close_price
+
+                shares      = total_shares
+                avg_entry   = total_cost / total_shares
+                raw_pnl     = realized_proceeds - total_cost
+                pnl_pct     = raw_pnl / total_cost * 100
+                entry_price = avg_entry  # for reporting: weighted avg cost basis
+
+            else:
+                current_stop = stop
+                for j in range(entry_idx + 1, min(entry_idx + max_hold + 1, n)):
+                    bar = df_full.iloc[j]
+
+                    if direction == "BUY":
+                        # Stop hit (low pierces stop)
+                        if bar["Low"] <= current_stop:
+                            exit_price  = current_stop
+                            exit_reason = "STOP"
+                            exit_idx    = j
+                            break
+                        # Targets (high reaches level)
+                        elif bar["High"] >= t3:
+                            exit_price  = t3
+                            exit_reason = "T3"
+                            exit_idx    = j
+                            break
+                        elif bar["High"] >= t2:
+                            exit_price  = t2
+                            exit_reason = "T2"
+                            exit_idx    = j
+                            break
+                        elif bar["High"] >= t1:
+                            exit_price  = t1
+                            exit_reason = "T1"
+                            exit_idx    = j
+                            break
+                    else:  # SHORT
+                        if bar["High"] >= stop:
+                            exit_price  = stop
+                            exit_reason = "STOP"
+                            exit_idx    = j
+                            break
+                        elif bar["Low"] <= t3:
+                            exit_price  = t3
+                            exit_reason = "T3"
+                            exit_idx    = j
+                            break
+                        elif bar["Low"] <= t2:
+                            exit_price  = t2
+                            exit_reason = "T2"
+                            exit_idx    = j
+                            break
+                        elif bar["Low"] <= t1:
+                            exit_price  = t1
+                            exit_reason = "T1"
+                            exit_idx    = j
+                            break
+
+                if exit_price is None:
+                    exit_price = float(df_full["Close"].iloc[exit_idx])
+
+                # P&L
+                raw_pnl = (
+                    (exit_price - entry_price) * shares if direction == "BUY"
+                    else (entry_price - exit_price) * shares
+                )
+                pnl_pct = (
+                    (exit_price - entry_price) / entry_price * 100 if direction == "BUY"
+                    else (entry_price - exit_price) / entry_price * 100
+                )
 
             capital += raw_pnl
             equity_curve.append(capital)
@@ -221,6 +386,9 @@ def run_strategy_backtest(
     risk_pct:        float = 0.01,
     max_workers:     int  = 8,
     progress_cb      = None,
+    buy_pyramid:      bool  = False,
+    dynamic_stop_pct: float = 2.0,
+    sell_mode:        str   = "runner",
 ) -> Dict:
     """
     Run walk-forward backtest across multiple tickers.
@@ -255,10 +423,13 @@ def run_strategy_backtest(
             return ticker, [], [initial_capital]
         trades, eq = backtest_ticker(
             ticker, df, spy,
-            min_score       = min_score,
-            max_hold        = max_hold,
-            initial_capital = initial_capital,
-            risk_pct        = risk_pct,
+            min_score        = min_score,
+            max_hold         = max_hold,
+            initial_capital  = initial_capital,
+            risk_pct         = risk_pct,
+            buy_pyramid      = buy_pyramid,
+            dynamic_stop_pct = dynamic_stop_pct,
+            sell_mode        = sell_mode,
         )
         return ticker, trades, eq
 

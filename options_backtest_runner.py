@@ -1,10 +1,11 @@
 """
 Options 45-60 DTE Backtest Runner
 ===================================
-Dashboard wrapper around strategies/swing_options_45_60d/src/backtest.py.
+Dashboard wrapper around strategies/swing_options_45_60d/src/backtest_engine.py.
 
-Loads OHLCV, computes indicators + signals, runs event-driven backtest,
-returns a result dict suitable for the dashboard render function.
+Fetches OHLCV, builds a CBT-style config dict, runs BacktestEngine, and
+reshapes the results into the trades_df/equity_df/metrics/per_ticker shape
+render_options_backtest() (dashboard.py) expects.
 """
 
 from __future__ import annotations
@@ -29,12 +30,9 @@ _STRATEGY_DIR = os.path.normpath(
 if _STRATEGY_DIR not in sys.path:
     sys.path.insert(0, _STRATEGY_DIR)
 
-from src.indicators  import compute_all_indicators
-from src.signals     import generate_signals
-from src.backtest    import run_backtest
-from src.options_sim import calc_option_entry
+from src.backtest_engine import BacktestEngine
 
-# ── Default params (mirrors config.yaml) ──────────────────────────────────────
+# ── Default params (mirrors strategies/swing_options_45_60d/config.yaml) ───────
 DEFAULT_PARAMS = {
     "ema_fast": 9, "ema_medium": 21, "ema_slow": 50, "ema_trend": 200,
     "sma_50": 50, "sma_200": 200,
@@ -43,7 +41,7 @@ DEFAULT_PARAMS = {
     "bb_period": 20, "bb_std": 2.0,
     "atr_period": 14,
     "volume_surge_multiplier": 1.5,
-    "adx_period": 14, "adx_min": 20,
+    "adx_period": 14, "adx_min": 25,
     "stoch_k": 14, "stoch_d": 3,
     "roc_period": 10,
     "delta_target": 0.55,
@@ -52,13 +50,11 @@ DEFAULT_PARAMS = {
     "gamma_min": 0.005, "gamma_max": 0.050,
     "theta_vega_ratio_max": 0.40,
     "max_entry_sigma": 0.50,
-    "min_signals_required": 4,
-    "atr_stop_multiplier": 2.0,
-    "atr_target_multiplier": 4.0,
-    "iv_rank_min": 5,
-    "iv_rank_max_call": 35,
-    "iv_rank_max_put": 65,
-    "percent_per_trade": 5.0,
+    "iv_rank_max": 30,
+    "dte_entry": 52,
+    "dte_exit_remaining": 21,
+    "min_score": 7.5,
+    "percent_per_trade": 2.0,
 }
 
 _yf_lock = Lock()
@@ -85,11 +81,6 @@ def _fetch_ohlcv(ticker: str, start: str, end: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def _fetch_vix(start: str, end: str) -> pd.Series:
-    df = _fetch_ohlcv("^VIX", start, end)
-    return df["Close"] if not df.empty else pd.Series(dtype=float)
-
-
 # ── Main public API ────────────────────────────────────────────────────────────
 
 def run_options_backtest(
@@ -97,26 +88,34 @@ def run_options_backtest(
     start_date:       str  = None,
     end_date:         str  = None,
     initial_capital:  float = 25_000.0,
-    tp_pct:           float = 0.50,
-    sl_pct:           float = 0.25,
-    dte_entry:        float = 50.0,
+    tp_pct:           float = 1.00,
+    sl_pct:           float = 0.50,
+    dte_entry:        float = 52.0,
     max_hold_days:    int   = 21,
-    max_positions:    int   = 4,
+    max_positions:    int   = 3,
     iv_premium:       float = 1.10,
     use_regime_filter: bool = True,
     min_score_override: float = None,
+    percent_per_trade: float = None,
     params:           dict = None,
     max_workers:      int   = 8,
     progress_cb:      Optional[Callable] = None,
 ) -> Dict:
     """
-    Run walk-forward options backtest across a list of tickers.
+    Run a walk-forward options backtest across a list of tickers, driving the
+    same BacktestEngine that strategies/swing_options_45_60d/run_backtest.py
+    drives from config.yaml.
+
+    Note: iv_premium and use_regime_filter are accepted for call-site
+    compatibility, but BacktestEngine hardcodes its own entry IV premium and
+    always applies its own SPY-regime gate (src/screener.py::_direction_for)
+    — neither is separately toggle-able from here.
 
     progress_cb(pct: float, msg: str) — optional progress callback.
 
     Returns dict:
         trades_df     — DataFrame of all closed trades
-        equity_df     — Date-indexed equity curve DataFrame
+        equity_df     — Date-indexed equity curve DataFrame (date, total_equity)
         metrics       — summary metrics dict
         per_ticker    — {symbol: {trades, win_rate, avg_pnl, total_pnl}}
         initial_capital
@@ -127,64 +126,34 @@ def run_options_backtest(
         start_date = (datetime.today() - timedelta(days=730)).strftime("%Y-%m-%d")
 
     p = {**DEFAULT_PARAMS, **(params or {})}
-    warmup_start = (
-        datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=220)
-    ).strftime("%Y-%m-%d")
 
     n_tickers = len(tickers)
     _cb = progress_cb or (lambda pct, msg: None)
 
-    _cb(0.02, "Fetching VIX…")
-    vix_series = _fetch_vix(warmup_start, end_date)
+    _cb(0.05, f"Fetching {n_tickers} tickers + SPY + VIX…")
 
-    # Compute IV rank from VIX
-    if not vix_series.empty:
-        from src.data_loader import compute_iv_rank
-        iv_rank_series = compute_iv_rank(vix_series)
-    else:
-        iv_rank_series = None
-
-    _cb(0.05, f"Fetching {n_tickers} tickers…")
-
-    # ── Fetch + compute indicators in parallel ─────────────────────────────────
+    # ── Fetch raw OHLCV in parallel — BacktestEngine computes indicators itself ──
     all_data: Dict[str, pd.DataFrame] = {}
     done_count = 0
+    tickers_with_spy = list(dict.fromkeys(["SPY", "^VIX"] + tickers))
 
-    def _process_ticker(sym: str):
-        df = _fetch_ohlcv(sym, warmup_start, end_date)
-        if df.empty or len(df) < 220:
-            return sym, None
-        try:
-            df = compute_all_indicators(df, p)
-        except Exception:
-            return sym, None
-
-        # Align IV rank to df index
-        if iv_rank_series is not None:
-            aligned_iv = iv_rank_series.reindex(df.index, method="ffill").fillna(35.0)
-        else:
-            aligned_iv = None
-
-        try:
-            df = generate_signals(df, p, iv_rank_series=aligned_iv)
-        except Exception:
-            return sym, None
-
-        return sym, df
-
-    tickers_with_spy = list(dict.fromkeys(["SPY"] + tickers))
+    def _fetch(sym: str):
+        df = _fetch_ohlcv(sym, start_date, end_date)
+        return sym, (df if not df.empty else None)
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = {ex.submit(_process_ticker, sym): sym for sym in tickers_with_spy}
+        futs = {ex.submit(_fetch, sym): sym for sym in tickers_with_spy}
         for fut in as_completed(futs):
             done_count += 1
             sym, df = fut.result()
             if df is not None:
                 all_data[sym] = df
             _cb(0.05 + 0.55 * done_count / len(tickers_with_spy),
-                f"Processed {done_count}/{len(tickers_with_spy)}")
+                f"Fetched {done_count}/{len(tickers_with_spy)}")
 
-    if not all_data:
+    vix_df = all_data.pop("^VIX", pd.DataFrame())
+
+    if "SPY" not in all_data or vix_df.empty:
         return {
             "trades_df": pd.DataFrame(),
             "equity_df": pd.DataFrame(),
@@ -195,22 +164,51 @@ def run_options_backtest(
 
     _cb(0.62, "Running backtest simulation…")
 
-    trades_df, equity_df = run_backtest(
-        all_data          = all_data,
-        params            = p,
-        initial_capital   = initial_capital,
-        tp_pct            = tp_pct,
-        sl_pct            = sl_pct,
-        dte_entry         = dte_entry,
-        max_hold_days     = max_hold_days,
-        max_positions     = max_positions,
-        iv_premium        = iv_premium,
-        use_regime_filter = use_regime_filter,
-        min_score_override = min_score_override,
-        vix_series        = vix_series if not vix_series.empty else None,
-    )
+    # max_hold_days is the dashboard's exposed knob for the engine's
+    # "exit once DTE remaining drops to X" threshold.
+    dte_exit_remaining = int(max_hold_days) if max_hold_days else int(p["dte_exit_remaining"])
+
+    config = {
+        "strategy_params": {
+            **p,
+            "dte_entry": dte_entry,
+            "dte_exit_remaining": dte_exit_remaining,
+            "min_score": min_score_override if min_score_override is not None else p["min_score"],
+        },
+        "account": {"initial_capital": initial_capital},
+        "sizing": {
+            "max_positions": max_positions,
+            "percent_per_trade": percent_per_trade if percent_per_trade is not None else p["percent_per_trade"],
+        },
+        "risk": {
+            "stop_loss":     {"percent": sl_pct * 100},
+            "take_profit":   {"percent": tp_pct * 100},
+            "trailing_stop": {"enabled": True, "activation": 50.0, "distance": 25.0},
+        },
+    }
+
+    engine = BacktestEngine(config)
+    engine.run(all_data, vix_df)
 
     _cb(0.92, "Computing metrics…")
+
+    trades_df = pd.DataFrame([{
+        "symbol":             t.symbol,
+        "direction":          t.direction,
+        "entry_date":         t.entry_date,
+        "exit_date":          t.exit_date,
+        "option_entry_price": t.entry_premium,
+        "option_exit_price":  t.exit_premium,
+        "contracts":          t.contracts,
+        "pnl":                t.pnl,
+        "pnl_pct":            t.pnl_pct / 100.0,
+        "days_held":          t.dte_at_entry - t.dte_at_exit,
+        "exit_reason":        t.exit_reason,
+    } for t in engine.trades])
+
+    equity_df = pd.DataFrame(engine.equity_curve)
+    if not equity_df.empty:
+        equity_df = equity_df.rename(columns={"equity": "total_equity"})
 
     metrics = {}
     per_ticker: Dict = {}
@@ -230,7 +228,7 @@ def run_options_backtest(
         total_return  = (final_equity - initial_capital) / initial_capital * 100
 
         # Max drawdown from equity curve
-        eq = equity_df["total_equity"].values if not equity_df.empty else [initial_capital]
+        eq = equity_df["total_equity"].values if not equity_df.empty else np.array([initial_capital])
         peak = np.maximum.accumulate(eq)
         dd   = (eq - peak) / (peak + 1e-9) * 100
         max_dd = float(dd.min())

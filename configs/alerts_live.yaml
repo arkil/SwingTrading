@@ -17,21 +17,37 @@ broker:
   secret_key: ""        # leave blank — reads ALPACA_SECRET_KEY env var
 
 universe:
-  preset: "High-Growth Tech"   # High-Growth Tech | Large Cap Leaders | S&P 500 | Nasdaq-100 | 🔥 Trending
+  preset: "Backtest Universe (583)"   # matches the 583-ticker universe the pyramid strategy was backtested on
+                                        # (other options: High-Growth Tech | Large Cap Leaders | S&P 500 | Nasdaq-100 | 🔥 Trending)
   custom_tickers: []            # override preset with specific tickers e.g. [NVDA, AAPL, TSLA]
 
 strategy:
   min_score:            8       # STRONG only — backtest: score≥8 → 57.7% WR vs 52.1% at score≥7
-  max_positions:        3       # max new bracket orders per day
+  max_positions:        15      # max new bracket orders per day
   risk_pct:             0.5     # % of portfolio to risk per trade
   max_position_pct:     5.0     # max single position size as % of portfolio
   max_dollars_per_trade: 1000   # hard cap: never spend more than $1000 per entry
   take_profit:          "T2"    # T1 (1R) | T2 (2R) | T3 (3R)
   direction:            "BUY"   # BUY | SELL | ALL
-  scan_time:            "09:35" # ET — scan starts 5 min after open
+  scan_time:            "09:30" # ET — scan starts at market open
 
 risk:
   max_hold_days:        20    # force-close after this many days even if no SL/TP
   monitor_interval_min: 15    # how often to check P&L and exit signals (minutes)
   urgent_exit:          true  # close position when exit signals are URGENT
   time_exit:            true  # close position when max_hold_days exceeded
+
+pyramid:
+  # BUY-only scale-in/scale-out mode, backtested across 583 tickers (1yr):
+  # best $/trade and profit factor of the variants tested. When enabled this
+  # REPLACES bracket orders with a plain entry + a standalone GTC stop, and
+  # the bot itself manages scale-in/scale-out — see alerts_live_runner.py's
+  # _run_day_pyramid / _manage_pyramid_positions.
+  #
+  # NOTE ON CAPITAL: each position can grow up to 3x max_dollars_per_trade
+  # above (initial entry + 2 scale-in legs, same $ each). With the current
+  # max_dollars_per_trade=1000 and max_positions=3, worst-case deployed
+  # capital is ~$9,000 (3 positions x up to $3,000 each), not $3,000.
+  enabled:           true
+  dynamic_stop_pct:  2.0                 # % below T1 the stop moves to once armed
+  sell_mode:         "scale_50_25_25"    # only mode wired to live trading so far

@@ -42,6 +42,22 @@ TRADES_DIR   = STRATEGY_DIR / "trades"
 GO_THRESHOLDS = [0, 1, 2, 3, 4, 5]
 DTE_TARGETS   = [0, 1, 2, 3, 5, 7]
 
+# Reliability floor: cells with fewer trades than this are numerically thin
+# (esp. dte_target=0, where near-zero BS-simulated premiums produce
+# division-blowup "returns" of thousands of percent on a handful of trades --
+# see strategies/_shared/options_sim.py:MIN_ENTRY_PREMIUM). Apply uniformly
+# so no thin-sample cell is reported as a finding.
+MIN_RELIABLE_TRADES = 100
+
+
+def _flag_unreliable(df: pd.DataFrame) -> pd.DataFrame:
+    """Mark cells below MIN_RELIABLE_TRADES so callers can exclude/footnote them."""
+    if df.empty or "n_trades" not in df.columns:
+        return df
+    df = df.copy()
+    df["reliable"] = df["n_trades"] >= MIN_RELIABLE_TRADES
+    return df
+
 
 # ── Trade simulation ──────────────────────────────────────────────────────────
 
@@ -326,11 +342,11 @@ def run_iterations_3(
 
     print(f"\n{'=' * 82}")
     print("Top 5 by EXPECTANCY (≥100 trades):")
-    best_exp = df[df["n_trades"] >= 100].sort_values("expectancy", ascending=False).head(5)
+    best_exp = df[df["n_trades"] >= MIN_RELIABLE_TRADES].sort_values("expectancy", ascending=False).head(5)
     for _, r in best_exp.iterrows():
         print(f"  {r['label']:<45}  WR={r['win_rate']:.1f}%  E={r['expectancy']:.0f}%  n={int(r['n_trades'])}")
     print("\nTop 5 by WIN RATE (≥100 trades):")
-    best_wr = df[df["n_trades"] >= 100].sort_values("win_rate", ascending=False).head(5)
+    best_wr = df[df["n_trades"] >= MIN_RELIABLE_TRADES].sort_values("win_rate", ascending=False).head(5)
     for _, r in best_wr.iterrows():
         print(f"  {r['label']:<45}  WR={r['win_rate']:.1f}%  E={r['expectancy']:.0f}%  n={int(r['n_trades'])}")
     print(f"\nResults saved → {out}")
@@ -391,7 +407,7 @@ def run_iterations(
     df.to_csv(out, index=False)
     print(f"\n{'=' * 68}")
     print(f"Best by win rate:")
-    best = df[df["n_trades"] >= 50].sort_values("win_rate", ascending=False).head(3)
+    best = df[df["n_trades"] >= MIN_RELIABLE_TRADES].sort_values("win_rate", ascending=False).head(3)
     for _, r in best.iterrows():
         print(f"  {r['label']:<45}  WR={r['win_rate']:.1f}%  n={int(r['n_trades'])}")
     print(f"\nIteration results saved → {out}")
@@ -448,7 +464,7 @@ def run_iterations_2(
 
     print(f"\n{'=' * 78}")
     print("Top 5 by win rate (≥50 trades):")
-    best = df[df["n_trades"] >= 50].sort_values("win_rate", ascending=False).head(5)
+    best = df[df["n_trades"] >= MIN_RELIABLE_TRADES].sort_values("win_rate", ascending=False).head(5)
     for _, r in best.iterrows():
         print(f"  {r['label']:<40}  DTE={int(r['dte'])}  WR={r['win_rate']:.1f}%  n={int(r['n_trades'])}")
     print(f"\nResults saved → {out}")
@@ -469,10 +485,14 @@ def run_sweep(strategy: Strategy, params: dict) -> pd.DataFrame:
         rows.append(m)
         print(f"n={m['n_trades']}  WR={m['win_rate']}%  E={m['expectancy']}%")
 
-    df = pd.DataFrame(rows)
+    df = _flag_unreliable(pd.DataFrame(rows))
     ts = datetime.now().strftime("%Y%m%d_%H%M")
     out = EXP_DIR / f"sweep_{ts}.csv"
     df.to_csv(out, index=False)
+    n_unreliable = int((~df["reliable"]).sum()) if "reliable" in df.columns else 0
+    if n_unreliable:
+        print(f"\n  NOTE: {n_unreliable} cell(s) have <{MIN_RELIABLE_TRADES} trades and are "
+              f"flagged reliable=False -- treat their metrics as noise, not edge.")
     print(f"\nSweep saved → {out}")
     return df
 
@@ -487,6 +507,10 @@ def print_sweep_table(df: pd.DataFrame) -> None:
     print("\n── Trade Count ──────────────────────────────────────")
     piv = df.pivot(index="go_threshold", columns="dte_target", values="n_trades")
     print(piv.to_string())
+    if "reliable" in df.columns:
+        print(f"\n── Reliable (n_trades ≥ {MIN_RELIABLE_TRADES}) ─────────────────────")
+        piv = df.pivot(index="go_threshold", columns="dte_target", values="reliable")
+        print(piv.to_string())
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────

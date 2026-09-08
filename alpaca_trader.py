@@ -19,9 +19,11 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
     LimitOrderRequest,
     MarketOrderRequest,
+    StopOrderRequest,
     StopLossRequest,
     TakeProfitRequest,
     GetOrdersRequest,
+    GetPortfolioHistoryRequest,
 )
 from alpaca.trading.enums import (
     OrderSide,
@@ -46,7 +48,7 @@ def get_account_summary(client: TradingClient) -> Dict[str, Any]:
         "cash":          float(acct.cash),
         "buying_power":  float(acct.buying_power),
         "portfolio_value": float(acct.portfolio_value),
-        "daytrade_count": int(acct.daytrade_count),
+        "daytrade_count": int(acct.daytrade_count or 0),
         "status":        str(acct.status),
         "pattern_day_trader": bool(acct.pattern_day_trader),
     }
@@ -126,6 +128,22 @@ def get_open_orders(client: TradingClient) -> List[Dict[str, Any]]:
     return result
 
 
+def get_order_status(client: TradingClient, order_id: str) -> Dict:
+    """Check fill status of a single order (used to confirm an entry filled
+    before placing its stop — avoids Alpaca's wash-trade rejection that fires
+    when a resting opposite-side order still exists for the same symbol)."""
+    try:
+        o = client.get_order_by_id(order_id)
+        return {
+            "ok": True,
+            "status": str(o.status),
+            "filled_qty": float(o.filled_qty or 0),
+            "qty": float(o.qty or 0),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def cancel_order(client: TradingClient, order_id: str) -> Dict:
     try:
         client.cancel_order_by_id(order_id)
@@ -172,10 +190,15 @@ def place_bracket_order(
     stop_price:      float,
     take_profit_price: float,
     shares:          int,
-    time_in_force:   TimeInForce = TimeInForce.DAY,
+    time_in_force:   TimeInForce = TimeInForce.GTC,
 ) -> Dict:
     """
     Place a bracket order: limit entry + stop-loss + take-profit.
+
+    time_in_force defaults to GTC, not DAY — this strategy holds swing
+    positions up to max_hold_days (20). A DAY bracket's stop-loss/take-profit
+    legs expire at the close of the entry day, silently leaving the position
+    with zero broker-side protection from day 2 onward.
 
     Returns dict with ok, order_id, or error.
     """
@@ -208,6 +231,70 @@ def place_bracket_order(
             "target":   target_r,
             "side":     direction,
         }
+    except Exception as e:
+        return {"ok": False, "symbol": symbol, "error": str(e)}
+
+
+# ── Pyramid strategy primitives ───────────────────────────────────────────────
+# Plain (non-bracket) orders — used for entry, scale-in adds, and partial
+# scale-out sells, since a native Alpaca bracket order can't express multiple
+# take-profit legs or growing position size.
+
+def place_simple_order(
+    client:        TradingClient,
+    symbol:        str,
+    side:          str,   # "BUY" or "SELL"
+    qty:           float,
+    order_type:    str = "market",   # "market" or "limit"
+    limit_price:   Optional[float] = None,
+    time_in_force: TimeInForce = TimeInForce.DAY,
+) -> Dict:
+    """Plain non-bracket order. Returns dict with ok, order_id, or error."""
+    order_side = OrderSide.BUY if side == "BUY" else OrderSide.SELL
+    try:
+        if order_type == "limit":
+            if limit_price is None:
+                return {"ok": False, "symbol": symbol, "error": "limit_price required for limit order"}
+            req = LimitOrderRequest(
+                symbol=symbol, qty=qty, side=order_side,
+                time_in_force=time_in_force, limit_price=round(limit_price, 2),
+            )
+        else:
+            req = MarketOrderRequest(
+                symbol=symbol, qty=qty, side=order_side,
+                time_in_force=time_in_force,
+            )
+        order = client.submit_order(req)
+        return {
+            "ok": True, "order_id": str(order.id),
+            "symbol": symbol, "side": side, "qty": qty,
+        }
+    except Exception as e:
+        return {"ok": False, "symbol": symbol, "error": str(e)}
+
+
+def place_stop_order(
+    client:     TradingClient,
+    symbol:     str,
+    qty:        float,
+    stop_price: float,
+    side:       str = "SELL",
+) -> Dict:
+    """
+    Standalone GTC stop-loss order — the exchange-side backstop for pyramid
+    positions. Returns order_id so it can be cancelled and replaced when the
+    dynamic stop moves (e.g. once T1 arms a new stop level).
+    """
+    order_side = OrderSide.BUY if side == "BUY" else OrderSide.SELL
+    try:
+        req = StopOrderRequest(
+            symbol=symbol, qty=qty, side=order_side,
+            time_in_force=TimeInForce.GTC,
+            stop_price=round(stop_price, 2),
+        )
+        order = client.submit_order(req)
+        return {"ok": True, "order_id": str(order.id), "symbol": symbol,
+                "qty": qty, "stop_price": round(stop_price, 2)}
     except Exception as e:
         return {"ok": False, "symbol": symbol, "error": str(e)}
 
@@ -245,18 +332,25 @@ def execute_alerts(
     results = []
 
     acct = get_account_summary(client)
-    buying_power = acct["buying_power"]
+    # Size off cash, not buying_power — buying_power includes margin (this
+    # account's margin multiplier is ~4x cash), and sizing off it risks
+    # drawing on margin the moment enough positions are open concurrently.
+    # No trading here should ever use margin.
+    cash = acct["cash"]
 
     # Existing positions — avoid doubling up
     existing = {p["symbol"] for p in get_positions(client)}
     pending  = {o["symbol"] for o in get_open_orders(client)}
     skip_set = existing | pending
 
-    # Filter & rank
+    # Filter & rank — by Conviction Score (weighted composite) when present,
+    # falling back to plain Score/R-R for callers passing an older DataFrame.
+    rank_cols = ["Conviction Score", "Score", "R/R"] if "Conviction Score" in alerts_df.columns \
+        else ["Score", "R/R"]
     df = alerts_df[
         (alerts_df["Score"] >= min_score) &
         (~alerts_df["Symbol"].isin(skip_set))
-    ].sort_values(["Score", "R/R"], ascending=False).head(max_new_positions)
+    ].sort_values(rank_cols, ascending=False).head(max_new_positions)
 
     for _, row in df.iterrows():
         sym     = row["Symbol"]
@@ -266,7 +360,7 @@ def execute_alerts(
         target  = float(row["T2"]) if use_t2_target else float(row["T1"])
 
         shares = _calc_shares(
-            buying_power    = buying_power,
+            buying_power    = cash,
             entry_price     = entry,
             stop_price      = stop,
             risk_pct        = risk_pct,
@@ -278,9 +372,17 @@ def execute_alerts(
             max_by_dollars = int(max_dollars_per_trade / entry)
             shares = min(shares, max(1, max_by_dollars))
 
+        # Never draw on margin — if even 1 share would overdraw remaining
+        # cash (e.g. a high-priced stock with little cash left this pass),
+        # skip the trade rather than let it borrow.
+        if shares > 0 and entry * shares > cash:
+            results.append({"ok": False, "symbol": sym,
+                            "error": "Skipped — would require margin (insufficient cash)"})
+            continue
+
         if shares == 0:
             results.append({"ok": False, "symbol": sym,
-                            "error": "Insufficient buying power"})
+                            "error": "Insufficient cash"})
             continue
 
         if dry_run:
@@ -297,8 +399,8 @@ def execute_alerts(
             )
             results.append(result)
 
-        # Reduce remaining buying power estimate
-        buying_power -= entry * shares
+        # Reduce remaining cash estimate
+        cash -= entry * shares
 
     return results
 
@@ -339,10 +441,44 @@ def get_todays_trades(client: TradingClient) -> List[Dict[str, Any]]:
     return result
 
 
+# ── OCC option symbol parsing ─────────────────────────────────────────────────
+# Shared by every bot/script that needs to know when an option position
+# expires — used to force-close positions before Alpaca auto-exercises an
+# ITM long option into a forced (and possibly margin-funded) stock position.
+# OCC format: ROOT + YYMMDD(6) + C/P(1) + strike*1000, zero-padded to 8 digits.
+
+import re as _re
+_OCC_RE = _re.compile(r"^([A-Z]{1,6})(\d{6})([CP])(\d{8})$")
+
+
+def parse_option_symbol(symbol: str) -> Optional[Dict[str, Any]]:
+    """Parse an OCC option symbol; returns None if `symbol` isn't one (e.g.
+    a plain equity ticker)."""
+    m = _OCC_RE.match(symbol)
+    if not m:
+        return None
+    root, yymmdd, right, strike_raw = m.groups()
+    try:
+        expiration = datetime.strptime(yymmdd, "%y%m%d").date()
+    except ValueError:
+        return None
+    return {
+        "underlying": root,
+        "expiration": expiration,
+        "right":      right,          # "C" or "P"
+        "strike":     int(strike_raw) / 1000.0,
+    }
+
+
+def is_option_symbol(symbol: str) -> bool:
+    return parse_option_symbol(symbol) is not None
+
+
 def get_portfolio_history(client: TradingClient, period: str = "1D") -> Dict:
     """Fetch equity curve for today (intraday)."""
     try:
-        hist = client.get_portfolio_history(period=period, timeframe="5Min", extended_hours=False)
+        req = GetPortfolioHistoryRequest(period=period, timeframe="5Min", extended_hours=False)
+        hist = client.get_portfolio_history(req)
         return {
             "equity":     list(hist.equity     or []),
             "profit_loss":list(hist.profit_loss or []),

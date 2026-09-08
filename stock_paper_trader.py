@@ -252,6 +252,20 @@ def _run_entry_scan(client, cfg: dict, state: Dict) -> None:
         log.info("Max positions (%d) reached — skipping entry scan", max_pos)
         return
 
+    # VIX regime: this bot is long-only (BUY-only), so there's no defensive
+    # "switch to puts" — pause new entries in HIGH-VOL, raise the bar in
+    # RISK-OFF. Same regime source/tiers as the options daemons.
+    from market_context import get_regime_summary
+    regime = get_regime_summary()
+    if regime["label"] == "HIGH-VOL":
+        log.info("VIX rank=%.0f — HIGH-VOL regime, pausing new entries this run",
+                 regime["vix"]["rank_1y"])
+        return
+    elif regime["label"] == "RISK-OFF":
+        min_score += 2
+        log.info("VIX rank=%.0f — RISK-OFF regime, raised min_score to %d",
+                 regime["vix"]["rank_1y"], min_score)
+
     log.info("Scanning %d tickers for stock signals (min_score=%d)…", len(tickers), min_score)
 
     try:
@@ -274,8 +288,10 @@ def _run_entry_scan(client, cfg: dict, state: Dict) -> None:
         log.info("  %-6s  score=%d  conviction=%s  R/R=%.1f",
                  r["Symbol"], r["Score"], r["Conviction"], r["R/R"])
 
-    acct         = get_account_summary(client)
-    buying_power = acct["buying_power"]
+    acct = get_account_summary(client)
+    # Size off cash, not buying_power — buying_power includes margin, and
+    # this bot should never draw on margin.
+    cash = acct["cash"]
 
     for _, row in alerts_df.iterrows():
         sym    = row["Symbol"]
@@ -284,7 +300,7 @@ def _run_entry_scan(client, cfg: dict, state: Dict) -> None:
         target = float(row["T2"]) if use_t2 else float(row["T1"])
 
         shares = _calc_shares(
-            buying_power     = buying_power,
+            buying_power     = cash,
             entry_price      = entry,
             stop_price       = stop,
             risk_pct         = risk_pct,
@@ -293,8 +309,12 @@ def _run_entry_scan(client, cfg: dict, state: Dict) -> None:
         if max_dollars > 0:
             shares = min(shares, max(1, int(max_dollars / entry)))
 
+        if shares > 0 and entry * shares > cash:
+            log.warning("  %-6s  Skipped — would require margin (insufficient cash)", sym)
+            continue
+
         if shares == 0:
-            log.warning("  %-6s  Insufficient buying power — skipping", sym)
+            log.warning("  %-6s  Insufficient cash — skipping", sym)
             continue
 
         log.info("  %-6s  entry=%.2f  stop=%.2f  target=%.2f  shares=%d",
@@ -337,7 +357,7 @@ def _run_entry_scan(client, cfg: dict, state: Dict) -> None:
                 "rr":         float(row["R/R"]),
                 "order_id":   result["order_id"],
             })
-            buying_power -= entry * shares
+            cash -= entry * shares
         else:
             log.warning("  ❌  ORDER FAILED  %s  %s", sym, result.get("error", ""))
 
@@ -469,7 +489,10 @@ def _check_exits(client, cfg: dict, state: Dict) -> None:
             "entry":      pos["entry_price"],
             "order_id":   result.get("order_id", ""),
         })
-        _remove_position(state, sym)
+        if result["ok"]:
+            _remove_position(state, sym)
+        else:
+            log.warning("  ⚠️  Keeping %s in tracked state — close failed, will retry next cycle", sym)
 
 
 # ── Monitor loop ──────────────────────────────────────────────────────────────

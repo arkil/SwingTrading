@@ -288,10 +288,15 @@ def detect_vcp(df: pd.DataFrame, lookback: int = 60) -> Dict[str, Any]:
         return {"detected": False, "contractions": 0, "pivot": None,
                 "depth_pct": None, "vol_dryup": False, "base_length": lookback}
 
-    # Pair swing highs with their following swing lows to get contractions
+    # Pair swing highs with swing lows sequentially — each contraction's
+    # high must fall after the previous contraction's low, so legs are
+    # discrete, non-overlapping pullbacks (peak1→trough1→peak2→trough2…)
+    # rather than every high sharing whatever low happens to come next.
     contractions = []
+    last_low_i = -1
     for sh_i in swing_high_idx:
-        # Find first swing low after this swing high
+        if sh_i <= last_low_i:
+            continue
         following_lows = [sl for sl in swing_low_idx if sl > sh_i]
         if not following_lows:
             continue
@@ -306,30 +311,35 @@ def detect_vcp(df: pd.DataFrame, lookback: int = 60) -> Dict[str, Any]:
             "depth_pct": depth,
             "avg_vol":   avg_vol,
         })
+        last_low_i = sl_i
 
     if len(contractions) < 2:
         return {"detected": False, "contractions": len(contractions), "pivot": None,
                 "depth_pct": None, "vol_dryup": False, "base_length": lookback}
 
-    # Check for tightening: each contraction shallower than the previous
+    # Tightening: fraction of adjacent contraction pairs where each pullback
+    # is shallower than the last. Canonical VCP wants this true across most
+    # of the base, not just the final pair.
     tightening_count = 0
     for i in range(1, len(contractions)):
         if contractions[i]["depth_pct"] < contractions[i-1]["depth_pct"]:
             tightening_count += 1
+    tightening_ratio = tightening_count / (len(contractions) - 1)
 
-    # Volume dry-up: last contraction avg volume < first contraction avg volume
+    # Volume dry-up: last contraction avg volume meaningfully below the first
     vol_dryup = contractions[-1]["avg_vol"] < contractions[0]["avg_vol"] * 0.85
 
     # Pivot = high of the last (tightest) contraction
     pivot     = contractions[-1]["high_val"]
     depth_pct = contractions[-1]["depth_pct"]
 
-    # Detect VCP if at least 2 tightening contractions and volume drying
-    detected = tightening_count >= 1 and depth_pct < 20.0 and vol_dryup
+    # Detect VCP only when most legs are actually tightening (not just one
+    # pair), the final leg is tight, and volume is drying up.
+    detected = tightening_ratio >= 0.5 and depth_pct < 20.0 and vol_dryup
 
     return {
         "detected":     detected,
-        "contractions": tightening_count + 1,
+        "contractions": len(contractions),
         "pivot":        round(float(pivot), 2),
         "depth_pct":    round(float(depth_pct), 2),
         "vol_dryup":    vol_dryup,

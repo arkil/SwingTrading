@@ -770,7 +770,7 @@ def backtest_vishti(price_df: pd.DataFrame,
         "p_val":             round(p_val, 4),
         "p_mann":            round(p_mann, 4),
         "significant":       p_val < 0.10,
-        "detail_df":         pdf[["Close", "ret", "bhadra"]].copy(),
+        "detail_df":         pdf[["Close", "ret", "bhadra", "cum_all", "cum_nobhadra"]].copy(),
         "monthly_df":        monthly,
     }
 

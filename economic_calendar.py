@@ -12,6 +12,7 @@ get_earnings_calendar(tickers, days=14)  → list[dict]  upcoming earnings dates
 from __future__ import annotations
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, date
+from datetime import time as _dt_time
 from typing import Optional
 import logging
 import re
@@ -283,40 +284,66 @@ def _get_static_events(days_ahead: int = 45) -> list[dict]:
 # Earnings calendar via yfinance
 # ═════════════════════════════════════════════════════════════════════════════
 
-def _fetch_one_earnings(sym: str, today: date, cutoff: date) -> list[dict]:
+def _classify_earnings_time(ts) -> str:
+    """
+    Classify an earnings report timestamp as Before Market Open, After
+    Market Close, or During Market — yfinance's earnings_dates index
+    returns the actual scheduled report time (tz-aware, exchange-local),
+    not just a bare date.
+    """
     try:
-        tk = yf.Ticker(sym)
-        cal = tk.calendar
-        if cal is None:
-            return []
-        if isinstance(cal, dict):
-            earn_dates = cal.get("Earnings Date", [])
-        else:
-            return []
-        if not isinstance(earn_dates, (list, tuple)):
-            earn_dates = [earn_dates]
-        results = []
-        for ed in earn_dates:
-            if ed is None:
-                continue
-            if hasattr(ed, "date"):
-                ed = ed.date()
-            elif isinstance(ed, str):
-                ed = _parse_date(ed)
-            if ed and today <= ed <= cutoff:
-                results.append({
-                    "date":     ed,
-                    "event":    f"{sym} Earnings",
-                    "category": "Earnings",
-                    "impact":   "MEDIUM",
-                    "time":     "Pre/After Market",
-                    "forecast": "",
-                    "previous": "",
-                    "source":   "yfinance",
-                })
-        return results
+        t = ts.time()
     except Exception:
-        return []
+        return "Time TBD"
+    if t < _dt_time(9, 30):
+        return "Pre-Market (BMO)"
+    if t >= _dt_time(16, 0):
+        return "After Market (AMC)"
+    return "During Market"
+
+
+def _fetch_one_earnings(sym: str, today: date, cutoff: date, retries: int = 2) -> list[dict]:
+    import time as _time
+
+    for attempt in range(retries + 1):
+        try:
+            tk = yf.Ticker(sym)
+            # `get_earnings_dates(limit=)` is more reliable than the `.earnings_dates`
+            # property. On the installed yfinance build both raise KeyError('Earnings
+            # Date') for many tickers that simply have no scheduled date — that's a
+            # permanent "no data", not transient, so don't burn 3 retries on it.
+            try:
+                ed_df = tk.get_earnings_dates(limit=16)
+            except KeyError:
+                return []
+            except Exception:
+                try:
+                    ed_df = tk.earnings_dates
+                except KeyError:
+                    return []
+            if ed_df is None or ed_df.empty:
+                return []
+            results = []
+            for ts in ed_df.index:
+                ed = ts.date()
+                if today <= ed <= cutoff:
+                    results.append({
+                        "date":     ed,
+                        "event":    f"{sym} Earnings",
+                        "category": "Earnings",
+                        "impact":   "MEDIUM",
+                        "time":     _classify_earnings_time(ts),
+                        "forecast": "",
+                        "previous": "",
+                        "source":   "yfinance",
+                    })
+            return results
+        except Exception as e:
+            if attempt < retries:
+                _time.sleep(0.5 * (attempt + 1))
+                continue
+            print(f"  [WARN] earnings fetch failed for {sym} after {retries + 1} attempts: {e}")
+            return []
 
 
 def get_earnings_calendar(tickers: list[str], days: int = 14) -> list[dict]:
@@ -326,11 +353,19 @@ def get_earnings_calendar(tickers: list[str], days: int = 14) -> list[dict]:
     today  = _today()
     cutoff = today + timedelta(days=days)
     results = []
+    n_fail  = 0
 
-    with ThreadPoolExecutor(max_workers=20) as ex:
+    with ThreadPoolExecutor(max_workers=5) as ex:
         futures = {ex.submit(_fetch_one_earnings, sym, today, cutoff): sym for sym in tickers}
         for future in as_completed(futures):
-            results.extend(future.result())
+            try:
+                results.extend(future.result())
+            except Exception as e:
+                n_fail += 1
+                print(f"  [WARN] earnings future raised for {futures[future]}: {e}")
+
+    if n_fail:
+        print(f"  [WARN] get_earnings_calendar: {n_fail}/{len(tickers)} ticker fetches raised an exception")
 
     return results
 

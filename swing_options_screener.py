@@ -9,6 +9,8 @@ Public API
     run_swing_options_screener(tickers, ...) -> pd.DataFrame
 """
 
+from __future__ import annotations
+
 import sys
 import os
 import warnings
@@ -39,7 +41,7 @@ DEFAULT_PARAMS = {
     "bb_period": 20, "bb_std": 2.0,
     "atr_period": 14,
     "volume_surge_multiplier": 1.5,
-    "adx_period": 14, "adx_min": 20,
+    "adx_period": 14, "adx_min": 25,
     "stoch_k": 14, "stoch_d": 3,
     "roc_period": 10,
     # Greeks / entry params
@@ -56,17 +58,10 @@ DEFAULT_PARAMS = {
 # ── VIX → IV rank helper ──────────────────────────────────────────────────────
 
 def _fetch_vix_rank() -> float:
-    """Fetch current VIX and return approximate IV rank (0-100)."""
+    """Current VIX 1-year percentile rank (0-100). Shared source: market_context.get_vix()."""
     try:
-        vix = yf.download("^VIX", period="1y", progress=False, auto_adjust=True)
-        if vix.empty:
-            return 25.0
-        close = vix["Close"].squeeze()
-        current = float(close.iloc[-1])
-        lo = float(close.min())
-        hi = float(close.max())
-        rank = (current - lo) / (hi - lo + 1e-9) * 100
-        return round(float(rank), 1)
+        from market_context import get_vix
+        return get_vix()["rank_1y"]
     except Exception:
         return 25.0
 
@@ -90,6 +85,140 @@ def _fetch_ohlcv(ticker: str, days: int = 600) -> pd.DataFrame:
         return df
     except Exception:
         return pd.DataFrame()
+
+
+# ── Real option chain fetcher ─────────────────────────────────────────────────
+
+def _fetch_real_option_data(
+    symbol: str,
+    direction: str,
+    target_dte: float = 50.0,
+    delta_target: float = 0.55,
+    r: float = 0.045,
+) -> dict | None:
+    """
+    Fetch a real option contract from yfinance nearest to target_dte and delta_target.
+    Returns a dict with the same keys as calc_option_entry plus expiry/bid/ask/volume/OI.
+    Returns None if no suitable contract found.
+    """
+    from datetime import date
+    from scipy.stats import norm
+
+    try:
+        ticker = yf.Ticker(symbol)
+        today = date.today()
+
+        fi = ticker.fast_info
+        S = float(fi.get("lastPrice") or fi.get("previousClose") or 0)
+        if not S:
+            return None
+
+        # Find expiration closest to target_dte (search 35–75 DTE window)
+        exps = ticker.options or []
+        valid = [e for e in exps if 35 <= (date.fromisoformat(e) - today).days <= 75]
+        if not valid:
+            return None
+        best_exp = min(valid, key=lambda e: abs((date.fromisoformat(e) - today).days - target_dte))
+        dte_actual = (date.fromisoformat(best_exp) - today).days
+        T = dte_actual / 365.0
+
+        chain = ticker.option_chain(best_exp)
+        df = chain.calls.copy() if direction.lower() == "call" else chain.puts.copy()
+        if df.empty:
+            return None
+
+        # Compute delta for each row using real IV so we can pick the right strike
+        def _compute_delta(row):
+            iv = float(row.get("impliedVolatility") or 0)
+            K = float(row.get("strike") or 0)
+            if iv <= 0 or K <= 0 or T <= 0:
+                return 0.0
+            sqrtT = np.sqrt(T)
+            try:
+                d1 = (np.log(S / K) + (r + 0.5 * iv ** 2) * T) / (iv * sqrtT)
+                return float(norm.cdf(d1)) if direction.lower() == "call" else float(-norm.cdf(-d1))
+            except Exception:
+                return 0.0
+
+        df["_delta"] = df.apply(_compute_delta, axis=1)
+        df["_delta_diff"] = (df["_delta"].abs() - delta_target).abs()
+        row = df.loc[df["_delta_diff"].idxmin()]
+
+        iv = float(row.get("impliedVolatility") or 0)
+        K = float(row["strike"])
+        bid = float(row.get("bid") or 0)
+        ask = float(row.get("ask") or 0)
+        mid = (bid + ask) / 2 if bid and ask else float(row.get("lastPrice") or 0)
+        volume = int(row.get("volume") or 0)
+        oi = int(row.get("openInterest") or 0)
+        contract = str(row.get("contractSymbol") or "")
+
+        # Compute Greeks from real IV
+        if iv > 0 and T > 0:
+            sqrtT = np.sqrt(T)
+            d1 = (np.log(S / K) + (r + 0.5 * iv ** 2) * T) / (iv * sqrtT)
+            d2 = d1 - iv * sqrtT
+            phi_d1 = norm.pdf(d1)
+            if direction.lower() == "call":
+                delta = float(norm.cdf(d1))
+                theta = (-S * phi_d1 * iv / (2 * sqrtT) - r * K * np.exp(-r * T) * norm.cdf(d2)) / 365
+            else:
+                delta = float(-norm.cdf(-d1))
+                theta = (-S * phi_d1 * iv / (2 * sqrtT) + r * K * np.exp(-r * T) * norm.cdf(-d2)) / 365
+            gamma = float(phi_d1 / (S * iv * sqrtT))
+            vega = float(S * phi_d1 * sqrtT / 100)
+        else:
+            delta = float(row["_delta"])
+            theta = gamma = vega = 0.0
+
+        return {
+            "strike":         K,
+            "premium":        round(mid, 2),
+            "delta":          round(abs(delta), 3),
+            "theta":          round(theta, 4),
+            "gamma":          round(gamma, 4),
+            "vega":           round(vega, 3),
+            "sigma":          round(iv, 3),
+            "dte":            dte_actual,
+            "T":              T,
+            "direction":      direction,
+            "underlying":     S,
+            "expiry":         best_exp,
+            "bid":            round(bid, 2),
+            "ask":            round(ask, 2),
+            "volume":         volume,
+            "open_interest":  oi,
+            "contract":       contract,
+        }
+    except Exception:
+        return None
+
+
+# ── Liquidity filter ──────────────────────────────────────────────────────────
+
+def _passes_liquidity(opt: dict, params: dict) -> tuple[bool, str]:
+    """
+    Hard gate on real option market quality.
+    Eliminates illiquid / wide-spread contracts that are lottery-ticket territory.
+    """
+    min_oi  = params.get("min_oi",  200)
+    min_vol = params.get("min_volume", 10)
+    max_spread_pct = params.get("max_spread_pct", 0.12)  # 12% of mid
+
+    oi  = opt.get("open_interest", 0) or 0
+    vol = opt.get("volume", 0) or 0
+    bid = opt.get("bid", 0) or 0
+    ask = opt.get("ask", 0) or 0
+    mid = opt.get("premium", 0) or 0.01
+
+    if oi < min_oi:
+        return False, f"OI={oi} < {min_oi}"
+    if vol < min_vol:
+        return False, f"vol={vol} < {min_vol}"
+    spread_pct = (ask - bid) / max(mid, 0.01)
+    if spread_pct > max_spread_pct:
+        return False, f"spread={spread_pct:.0%} > {max_spread_pct:.0%}"
+    return True, ""
 
 
 # ── Greeks filter (mirrors backtest.py logic) ─────────────────────────────────
@@ -206,19 +335,17 @@ def run_swing_options_screener(
         if hist_vol * iv_premium > p.get("max_entry_sigma", 0.50):
             continue
 
-        try:
-            opt = calc_option_entry(
-                S=close,
-                direction=direction,
-                dte=dte,
-                hist_vol=hist_vol,
-                iv_premium=iv_premium,
-                delta_target=p.get("delta_target", 0.55),
-            )
-        except Exception:
+        opt = _fetch_real_option_data(
+            symbol=sym,
+            direction=direction,
+            target_dte=dte,
+            delta_target=p.get("delta_target", 0.55),
+        )
+        if opt is None:
             continue
 
         passes, reason = _passes_greeks(opt, p)
+        liq_ok, liq_reason = _passes_liquidity(opt, p)
 
         theta_pct = abs(opt["theta"]) / max(opt["premium"], 0.01)
         tv_ratio = abs(opt["theta"]) / max(opt["vega"], 1e-9)
@@ -228,8 +355,15 @@ def run_swing_options_screener(
             "Direction":    direction.upper(),
             "Score":        row["score"],
             "Close":        round(close, 2),
+            "Expiry":       opt.get("expiry", "—"),
+            "DTE":          opt.get("dte", int(dte)),
             "Strike":       int(opt["strike"]),
+            "Bid":          opt.get("bid", "—"),
+            "Ask":          opt.get("ask", "—"),
             "Premium":      round(opt["premium"], 2),
+            "Volume":       opt.get("volume", 0),
+            "OI":           opt.get("open_interest", 0),
+            "IV":           round(opt.get("sigma", 0) * 100, 1),
             "Delta":        round(abs(opt["delta"]), 3),
             "Theta/day":    round(opt["theta"], 4),
             "Gamma":        round(opt["gamma"], 4),
@@ -237,6 +371,9 @@ def run_swing_options_screener(
             "θ/Prem %":     round(theta_pct * 100, 2),
             "θ/Vega":       round(tv_ratio, 3),
             "Greeks OK":    "✅" if passes else f"❌ {reason}",
+            "Liq OK":       "✅" if liq_ok else f"❌ {liq_reason}",
+            "_passes_liq":  liq_ok,
+            "Contract":     opt.get("contract", ""),
             "Hist Vol":     round(hist_vol, 3),
             "ATR":          round(row.get("atr", 0), 2),
             "ADX":          round(row.get("adx", 0), 1),

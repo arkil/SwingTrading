@@ -19,6 +19,7 @@ import argparse
 import asyncio
 import logging
 import os
+import signal
 from datetime import datetime, time, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -366,6 +367,17 @@ class PyramidRunner:
         await stream._run_forever()
 
     def run(self) -> None:
+        # SIGTERM (what `launchctl stop`/`unload` sends, and what a bare
+        # `kill` sends) is not KeyboardInterrupt and by default kills the
+        # process with zero cleanup — any open pyramid position would be
+        # left dangling, unmonitored, and can ride into expiration where
+        # Alpaca auto-exercises it into a forced (margin) stock position.
+        # Route it through the same KeyboardInterrupt path below so a
+        # service stop always closes open positions first.
+        def _on_sigterm(signum, frame):
+            raise KeyboardInterrupt()
+        signal.signal(signal.SIGTERM, _on_sigterm)
+
         try:
             asyncio.run(self.run_async())
         except KeyboardInterrupt:

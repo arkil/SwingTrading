@@ -24,3 +24,6 @@ strategies/**/experiments/
 
 # Earnings IV-Crush nightly prefetch cache (regenerated daily)
 Data/earnings_iv/
+
+# Streamlit secrets
+.streamlit/secrets.toml

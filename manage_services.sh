@@ -16,6 +16,8 @@ AGENTS=(
   "com.swingtrading.alerts-live:alerts:logs/alerts_live_daemon.log"
   "com.swingtrading.spy-reversal:spy:logs/spy_reversal_daemon.log"
   "com.swingtrading.v6-options:v6:/Users/arkilthakkar/workplace/strategies/swing_options_45_60d/logs/v6_daemon.log"
+  "com.swingtrading.expiry-sweep:expiry-sweep:logs/expiry_sweep.log"
+  "com.swingtrading.earnings-iv:earnings-iv:logs/earnings_iv_prefetch.log"
 )
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -66,12 +68,28 @@ cmd_status() {
   echo ""
 }
 
+MAX_LOG_BYTES=$((200 * 1024 * 1024))  # 200MB — launchd just reopens the path after rotation
+
+# A crash-looping daemon (e.g. a websocket reconnecting without backoff) can
+# dump a full traceback per retry and fill a log to multiple GB before anyone
+# notices. Rotate in place on every start/restart so that can't happen again.
+_rotate_if_large() {
+  local logf="$1"
+  [[ -f "$logf" ]] || return
+  local size; size=$(stat -f%z "$logf" 2>/dev/null || stat -c%s "$logf" 2>/dev/null || echo 0)
+  if (( size > MAX_LOG_BYTES )); then
+    mv "$logf" "${logf}.1"
+    echo "  (log was $((size / 1024 / 1024))MB — rotated to $(basename "$logf").1)"
+  fi
+}
+
 cmd_start() {
   local target="$1"
   for entry in "${AGENTS[@]}"; do
     [[ -n "$target" && "$(_alias "$entry")" != "$target" && "$(_label "$entry")" != "$target" ]] && continue
     local label; label=$(_label "$entry")
     local plist="$LAUNCH_DIR/${label}.plist"
+    _rotate_if_large "$(_log "$entry")"
     echo "Starting $label..."
     launchctl load -w "$plist" 2>/dev/null && echo "  ✅  loaded" || echo "  (already loaded or error)"
   done

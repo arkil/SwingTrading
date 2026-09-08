@@ -69,7 +69,7 @@ def get_sp500_tickers() -> List[str]:
 def get_nasdaq100_tickers() -> List[str]:
     """Fetch current Nasdaq-100 constituents from Wikipedia."""
     try:
-        tables = _wiki_tables("https://en.wikipedia.org/wiki/Nasdaq-100")
+        tables = _wiki_tables("https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies")
         # Find the table that has a 'Ticker' column
         for tbl in tables:
             if "Ticker" in tbl.columns:
@@ -193,7 +193,7 @@ WATCHLIST_TICKERS = [
     "CRWV",   # CoreWeave — pure-play AI cloud ($10B+ revenue projected 2026)
     "SMCI",   # Super Micro Computer — AI servers & rack systems
     "LRCX",   # Lam Research — semiconductor etch/deposition equipment
-    "CEL",    # Celestica — AI server deployment & integration
+    "CLS",    # Celestica — AI server deployment & integration
     "ALAB",   # Astera Labs — PCIe/CXL connectivity for AI data centers
     "MRVL",   # Marvell Technology — custom AI silicon & networking
     "ARM",    # Arm Holdings — CPU architecture for AI edge & data center
@@ -239,7 +239,7 @@ WATCHLIST_TICKERS = [
     "ZS",     # Zscaler — cloud-native zero-trust security
     "OKTA",   # Okta — identity & access management
     "S",      # SentinelOne — AI-native endpoint security
-    "CYBR",   # CyberArk — privileged access management
+    # "CYBR" removed — CyberArk merged into Palo Alto Networks, delisted 2026-02-11
     "QLYS",   # Qualys — vulnerability management
 
     # ── Quantum Computing ─────────────────────────────────────────────────
