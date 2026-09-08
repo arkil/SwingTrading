@@ -582,7 +582,10 @@ def regime_context_banner(is_bullish: pd.Series, key: str) -> None:
 def fetch_ohlcv(ticker: str, days: int = 120) -> pd.DataFrame:
     end   = datetime.today()
     start = end - timedelta(days=days + 30)
-    raw   = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=True)
+    try:
+        raw = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=True)
+    except Exception:
+        return pd.DataFrame()
     if raw is None or raw.empty:
         return pd.DataFrame()
     if isinstance(raw.columns, pd.MultiIndex):
@@ -1250,8 +1253,11 @@ def render_livermore():
         files = sorted(glob.glob(os.path.join(SCREENER_DIR, "livermore_*.csv")) +
                        glob.glob(os.path.join(SCREENER_DIR, "signals_*.csv")))
         if files:
-            st.session_state.lv_df   = pd.read_csv(files[-1])
-            st.session_state.lv_time = "from saved file"
+            try:
+                st.session_state.lv_df   = pd.read_csv(files[-1])
+                st.session_state.lv_time = "from saved file"
+            except Exception as e:
+                st.error(f"Could not load {os.path.basename(files[-1])}: {e}")
 
     if clicked:
         tickers = get_selected_tickers()
@@ -8692,9 +8698,12 @@ def render_weekly_options():
     if load_btn:
         files = sorted(glob.glob(os.path.join(SCREENER_DIR, "weekly_calls_*.csv")))
         if files:
-            st.session_state.wkly_opts_df   = pd.read_csv(files[-1])
-            st.session_state.wkly_opts_time = f"from file · {os.path.basename(files[-1])}"
-            st.toast("Loaded last saved scan.", icon="📂")
+            try:
+                st.session_state.wkly_opts_df   = pd.read_csv(files[-1])
+                st.session_state.wkly_opts_time = f"from file · {os.path.basename(files[-1])}"
+                st.toast("Loaded last saved scan.", icon="📂")
+            except Exception as e:
+                st.error(f"Could not load {os.path.basename(files[-1])}: {e}")
         else:
             st.warning("No saved scan found. Click ▶ Scan Now to run one.")
 
@@ -9720,6 +9729,291 @@ def render_parabolic_short():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Qullamaggie — Breakout & Episodic Pivot Screener
+# https://qullamaggie.com — momentum-leader continuation, opening-range breakout
+# ─────────────────────────────────────────────────────────────────────────────
+
+def render_qullamaggie():
+    """Kristjan Kullamägi's setups: Breakout (flag continuation) + Episodic Pivot."""
+    import numpy as np
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from datetime import date as _date
+
+    clicked = _page_header(
+        "🐢", "Qullamaggie Setups",
+        "Momentum-leader breakouts and episodic pivots — his exact checklist, on daily bars.",
+        scan_key="qm_scan_btn", last_key="qm_last_time",
+    )
+
+    mode = st.radio(
+        "Setup", ["💥 Breakout (flag continuation)", "📣 Episodic Pivot (gap on news)"],
+        horizontal=True, key="qm_mode", label_visibility="collapsed",
+    )
+    is_ep = mode.startswith("📣")
+
+    with st.expander("ℹ️ How Qullamaggie trades this", expanded=False):
+        if not is_ep:
+            st.markdown("""
+**The Breakout setup** — a stock that has *already* made a big move (the "momentum leader"),
+pauses in a tight, low-volume flag near its highs, then breaks out.
+
+1. **Momentum** — up 30–100%+ over the last 1–6 months, an RS leader.
+2. **Trend** — price above a rising 10 EMA > 20 EMA > 50 SMA (MAs stacked).
+3. **ADR%** — average daily range ≥ ~3.5% (needs volatility to pay).
+4. **Liquidity** — dollar volume ≥ a few $M so you can get filled.
+5. **The flag** — 1–4 weeks of *contracting* range on *declining* volume, price holding near the 52-wk high.
+6. **Trigger** — buy the break of the consolidation high on the opening-range (1/5/60-min) high.
+   *Stop* = low of the day / low of the entry candle. Sell ⅓–½ into strength after 3–5 days,
+   trail the rest on the 10- or 20-day MA.
+""")
+        else:
+            st.markdown("""
+**The Episodic Pivot (EP)** — an explosive gap on a *fundamental catalyst* (earnings, guidance, news)
+out of a quiet base.
+
+1. **Gap** — opens ≥ 10% above yesterday's close on huge volume (≥ 3× average).
+2. **Base** — was quiet / basing beforehand, *not* already extended (6-mo move < ~100%).
+3. **ADR% / liquidity** — same volatility and dollar-volume floors as the breakout.
+4. **Trigger** — buy the high of the first 1/5-min bar (daily proxy: the gap-day high).
+   *Stop* = low of the day. Manage identically to the breakout.
+""")
+
+    with st.expander("⚙️ Settings", expanded=False):
+        c1, c2, c3, c4 = st.columns(4)
+        qm_min_score = c1.slider("Min checklist score", 3, 9, 6, key="qm_min_score")
+        qm_adr_min   = c2.slider("Min ADR %", 2.0, 8.0, 3.5, step=0.5, key="qm_adr_min")
+        qm_dv_min    = c3.slider("Min $ volume (M)", 1.0, 50.0, 3.0, step=1.0, key="qm_dv_min")
+        qm_near_high = c4.slider("Max % below 52-wk high", 5, 50, 25, key="qm_near_high")
+
+        c5, c6, c7, c8 = st.columns(4)
+        if not is_ep:
+            qm_flag_len  = c5.slider("Flag length (days)", 5, 30, 10, key="qm_flag_len")
+            qm_mom_min   = c6.slider("Min momentum move %", 10, 150, 30, key="qm_mom_min",
+                                     help="Best of 1-/3-/6-month % gain must clear this")
+            qm_arm_pct   = c7.slider("Setup proximity %", 1.0, 10.0, 4.0, step=0.5, key="qm_arm_pct",
+                                     help="Show 'setting up' names within this % below the pivot")
+            qm_gap_min = 10.0; qm_vol_mult = 3.0
+        else:
+            qm_gap_min   = c5.slider("Min gap %", 5.0, 30.0, 10.0, step=1.0, key="qm_gap_min")
+            qm_vol_mult  = c6.slider("Min volume × avg", 1.5, 10.0, 3.0, step=0.5, key="qm_vol_mult")
+            qm_ext_max   = c7.slider("Max 6-mo move % (not extended)", 30, 250, 100, key="qm_ext_max")
+            qm_flag_len = 10; qm_mom_min = 0; qm_arm_pct = 4.0
+        acct = c8.number_input("Account size ($)", 1000, 10_000_000, 30_000, step=1000, key="qm_acct")
+        qm_risk = st.slider("Risk per trade (% of account)", 0.25, 2.0, 0.5, step=0.25, key="qm_risk")
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+    @st.cache_data(ttl=1800, show_spinner=False)
+    def _qm_daily(symbol):
+        try:
+            t = yf.Ticker(symbol)
+            h = t.history(period="14mo", interval="1d").dropna(subset=["Close"])
+            dv = getattr(t.fast_info, "market_cap", None)
+            return h, float(dv or 0)
+        except Exception:
+            return pd.DataFrame(), 0.0
+
+    def _rising(s, lb=5):
+        return len(s) > lb and s.iloc[-1] > s.iloc[-1 - lb]
+
+    def _scan_one(sym):
+        h, _cap = _qm_daily(sym)
+        if h.empty or len(h) < 60:
+            return None
+        close, high, low, vol = h["Close"], h["High"], h["Low"], h["Volume"]
+        px      = float(close.iloc[-1])
+        prev    = float(close.iloc[-2])
+        opn     = float(h["Open"].iloc[-1])
+        chg     = (px - prev) / prev * 100 if prev else 0.0
+        ema10   = close.ewm(span=10).mean()
+        ema20   = close.ewm(span=20).mean()
+        sma50   = close.rolling(50).mean()
+        adr_pct = float(((high / low - 1).tail(20).mean()) * 100)
+        dollar_vol = float((close * vol).tail(20).median())
+        hi_52   = float(high.tail(252).max())
+        from_hi = (px - hi_52) / hi_52 * 100
+        def _mom(n):
+            return (px / float(close.iloc[-1 - n]) - 1) * 100 if len(close) > n else 0.0
+        m1, m3, m6 = _mom(21), _mom(63), _mom(126)
+        best_mom = max(m1, m3, m6)
+
+        gates, detail = {}, {}
+        gates["ADR% ≥ min"]      = adr_pct >= qm_adr_min
+        gates["Liquidity"]       = dollar_vol >= qm_dv_min * 1e6
+        gates["Near 52-wk high"] = from_hi >= -qm_near_high
+        gates["Trend stacked"]   = px > ema10.iloc[-1] > ema20.iloc[-1] > sma50.iloc[-1]
+        gates["MAs rising"]      = _rising(ema10) and _rising(ema20) and _rising(sma50)
+        detail.update(adr_pct=round(adr_pct, 2), dollar_vol_m=round(dollar_vol / 1e6, 1),
+                      from_hi=round(from_hi, 1), m1=round(m1, 1), m3=round(m3, 1), m6=round(m6, 1))
+
+        if not is_ep:
+            flag = h.tail(qm_flag_len)
+            prior = h.iloc[-2 * qm_flag_len:-qm_flag_len] if len(h) >= 2 * qm_flag_len else h.head(qm_flag_len)
+            pivot = float(flag["High"].max())
+            flag_range = (flag["High"].max() - flag["Low"].min()) / flag["Low"].min() * 100
+            prior_range = (prior["High"].max() - prior["Low"].min()) / prior["Low"].min() * 100 if len(prior) else flag_range
+            contracting = flag_range < prior_range
+            vol_declining = flag["Volume"].tail(5).mean() < prior["Volume"].mean() if len(prior) else False
+            triggered = float(high.iloc[-1]) >= pivot and px >= pivot * 0.985
+            arming = (not triggered) and px >= pivot * (1 - qm_arm_pct / 100)
+            gates["Momentum leader"] = best_mom >= qm_mom_min
+            gates["Tight flag"]      = contracting and flag_range <= max(adr_pct * qm_flag_len * 0.6, 3 * adr_pct)
+            gates["Volume drying up"] = bool(vol_declining)
+            gates["Breakout armed"]  = bool(triggered or arming)
+            # Qullamaggie's working stop = low of the breakout day / entry candle.
+            # The flag low is only the wider "disaster" stop.
+            stop = float(low.tail(2).min())
+            disaster_stop = float(flag["Low"].min())
+            detail["disaster_stop"] = round(disaster_stop, 2)
+            entry = pivot
+            status = "🔥 TRIGGERED" if triggered else ("👀 SETTING UP" if arming else "· base building")
+            detail.update(pivot=round(pivot, 2), flag_range=round(flag_range, 1),
+                          prior_range=round(prior_range, 1), best_mom=round(best_mom, 1))
+        else:
+            gap_pct = (opn - prev) / prev * 100 if prev else 0.0
+            vol_x = float(vol.iloc[-1] / vol.tail(20).mean()) if vol.tail(20).mean() else 0.0
+            gates["Gap ≥ min"]       = gap_pct >= qm_gap_min
+            gates["Volume climax"]   = vol_x >= qm_vol_mult
+            gates["Not extended"]    = m6 <= qm_ext_max
+            gates["Above 50 SMA"]    = px > sma50.iloc[-1]
+            entry = float(high.iloc[-1])
+            stop  = float(low.iloc[-1])
+            triggered = px >= entry * 0.985
+            status = "🔥 GAP TODAY" if gap_pct >= qm_gap_min else "· stale gap"
+            detail.update(gap_pct=round(gap_pct, 1), vol_x=round(vol_x, 1))
+
+        score = sum(1 for v in gates.values() if v)
+        risk_pct = (entry - stop) / entry * 100 if entry else 0.0
+        shares = int((acct * qm_risk / 100) / (entry - stop)) if entry > stop else 0
+        return dict(symbol=sym, price=round(px, 2), chg_pct=round(chg, 2), score=score,
+                    n_gates=len(gates), status=status, entry=round(entry, 2), stop=round(stop, 2),
+                    risk_pct=round(risk_pct, 2), target_1r=round(entry + (entry - stop), 2),
+                    shares=shares, gates=gates, detail=detail)
+
+    if "qm_results" not in st.session_state:
+        st.session_state.qm_results = []
+        st.session_state.qm_last_time = None
+
+    if clicked:
+        syms = get_selected_tickers()
+        _ticker_count_caption(syms)
+        prog = st.progress(0, text="Scanning…")
+        raw, done = [], 0
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futs = {pool.submit(_scan_one, s): s for s in syms}
+            for fut in as_completed(futs):
+                done += 1
+                prog.progress(done / len(syms), text=f"Scanned {done}/{len(syms)}")
+                try:
+                    row = fut.result()
+                    if row and row["score"] >= qm_min_score:
+                        raw.append(row)
+                except Exception:
+                    pass
+        prog.empty()
+        raw.sort(key=lambda x: (-x["score"], -x["detail"].get("best_mom", x["detail"].get("gap_pct", 0))))
+        st.session_state.qm_results = raw
+        st.session_state.qm_last_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+        if raw:
+            save_scan_result(
+                pd.DataFrame([{k: v for k, v in r.items() if not isinstance(v, dict)} for r in raw]),
+                "qullamaggie_ep" if is_ep else "qullamaggie",
+            )
+
+    results = st.session_state.qm_results
+    if not results and st.session_state.qm_last_time:
+        st.warning("Nothing matched. Lower the checklist score or loosen ADR / momentum.", icon="⚠️")
+        return
+    if not results:
+        st.info("Hit **Scan Now** to find Qullamaggie setups.", icon="ℹ️")
+        return
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Candidates", len(results))
+    m2.metric("Triggered", sum(1 for r in results if "🔥" in r["status"]))
+    m3.metric("Full score", sum(1 for r in results if r["score"] == r["n_gates"]))
+    top = results[0]
+    m4.metric("Top pick", f"{top['symbol']} ({top['score']}/{top['n_gates']})")
+    st.divider()
+
+    rows = []
+    for r in results:
+        d = r["detail"]
+        rows.append({
+            "Symbol": r["symbol"], "Status": r["status"], "Price": f"${r['price']:,.2f}",
+            "Score": f"{r['score']}/{r['n_gates']}",
+            "Entry": f"${r['entry']:,.2f}", "Stop": f"${r['stop']:,.2f}",
+            "Risk %": r["risk_pct"], "1R target": f"${r['target_1r']:,.2f}",
+            "Shares": r["shares"], "ADR %": d.get("adr_pct", ""),
+            "$Vol M": d.get("dollar_vol_m", ""), "% < 52wH": d.get("from_hi", ""),
+            "1m %": d.get("m1", ""), "3m %": d.get("m3", ""), "6m %": d.get("m6", ""),
+            "Gap %": d.get("gap_pct", ""),
+        })
+    tbl = pd.DataFrame(rows)
+    if not is_ep:
+        tbl = tbl.drop(columns=["Gap %"])
+
+    def _color(row):
+        try:
+            n, d = map(int, str(row["Score"]).split("/"))
+        except Exception:
+            n, d = 0, 1
+        if "🔥" in str(row["Status"]): bg = "background-color:rgba(38,166,154,0.28)"
+        elif n == d:                   bg = "background-color:rgba(38,166,154,0.16)"
+        elif "👀" in str(row["Status"]): bg = "background-color:rgba(255,235,59,0.16)"
+        else:                          bg = ""
+        return [bg] * len(row)
+
+    st.dataframe(
+        tbl.style.apply(_color, axis=1).format({
+            "Risk %": "{:.2f}%", "1m %": "{:+.0f}%", "3m %": "{:+.0f}%",
+            "6m %": "{:+.0f}%", "% < 52wH": "{:.1f}%", "ADR %": "{:.1f}%",
+            "Gap %": "{:+.1f}%",
+        }),
+        use_container_width=True, hide_index=True,
+        height=min(600, 55 + 36 * len(tbl)),
+    )
+
+    st.divider()
+    st.markdown("##### Detailed Breakdown")
+    for r in results:
+        d = r["detail"]
+        with st.expander(
+            f"**{r['symbol']}**  ·  ${r['price']:,.2f}  ·  {r['status']}  ·  "
+            f"Score **{r['score']}/{r['n_gates']}**  ·  "
+            f"Entry ${r['entry']:,.2f} / Stop ${r['stop']:,.2f}  ({r['risk_pct']:.1f}% risk)"
+        ):
+            gc, pc = st.columns([3, 2])
+            with gc:
+                st.markdown("**Checklist**")
+                for name, ok in r["gates"].items():
+                    st.write(f"{'✅' if ok else '❌'} {name}")
+            with pc:
+                st.markdown("**Trade plan**")
+                st.write(f"Entry (pivot / gap-day high): **${r['entry']:,.2f}**")
+                st.write(f"Stop (low of breakout day): **${r['stop']:,.2f}**"
+                         + (f"  ·  disaster stop ${d['disaster_stop']:,.2f}" if 'disaster_stop' in d else ""))
+                st.write(f"1R target (trim ⅓–½): **${r['target_1r']:,.2f}**")
+                st.write(f"Size @ {st.session_state.get('qm_risk', 0.5)}% risk: **{r['shares']} sh** "
+                         f"(≈${r['shares'] * r['entry']:,.0f})")
+                st.caption("Trail the rest on the 10/20-day MA. Exit if it closes back inside the base.")
+            st.markdown(
+                f"ADR **{d.get('adr_pct','–')}%** · $Vol **{d.get('dollar_vol_m','–')}M** · "
+                f"**{d.get('from_hi','–')}%** from 52-wk high · "
+                f"Momentum 1m **{d.get('m1','–')}%** / 3m **{d.get('m3','–')}%** / 6m **{d.get('m6','–')}%**"
+                + (f" · Flag range **{d['flag_range']}%** vs prior **{d['prior_range']}%**" if 'flag_range' in d else "")
+                + (f" · Gap **{d['gap_pct']}%** on **{d['vol_x']}×** volume" if 'gap_pct' in d else "")
+            )
+
+    st.divider()
+    dl = pd.DataFrame([{k: v for k, v in r.items() if not isinstance(v, dict)} for r in results])
+    st.download_button(
+        "⬇️ Download CSV", data=dl.to_csv(index=False),
+        file_name=f"qullamaggie_{'ep' if is_ep else 'breakout'}_{_date.today().isoformat()}.csv",
+        mime="text/csv",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 0DTE Options Scanner
 # Strategies: Gap & Go · Momentum Scalp · Reversal · Flow Play
 # ─────────────────────────────────────────────────────────────────────────────
@@ -10540,14 +10834,17 @@ def render_0dte_scanner():
     if load_btn:
         files = sorted(glob.glob(os.path.join(SCREENER_DIR, "0dte_*.csv")))
         if files:
-            saved = pd.read_csv(files[-1])
-            if "side" in saved.columns:
-                st.session_state.dte0_df_calls = saved[saved["side"] == "call"]
-                st.session_state.dte0_df_puts  = saved[saved["side"] == "put"]
-            else:
-                st.session_state.dte0_spread_df = saved
-            st.session_state.dte0_time = f"from file · {os.path.basename(files[-1])}"
-            st.toast("Loaded last 0DTE scan.", icon="📂")
+            try:
+                saved = pd.read_csv(files[-1])
+                if "side" in saved.columns:
+                    st.session_state.dte0_df_calls = saved[saved["side"] == "call"]
+                    st.session_state.dte0_df_puts  = saved[saved["side"] == "put"]
+                else:
+                    st.session_state.dte0_spread_df = saved
+                st.session_state.dte0_time = f"from file · {os.path.basename(files[-1])}"
+                st.toast("Loaded last 0DTE scan.", icon="📂")
+            except Exception as e:
+                st.error(f"Could not load {os.path.basename(files[-1])}: {e}")
 
     # ── Run scan ──────────────────────────────────────────────────────────────
     if clicked:
@@ -10972,9 +11269,12 @@ def render_cheap_calls():
     if load_btn:
         files = sorted(glob.glob(os.path.join(SCREENER_DIR, "cheap_calls_*.csv")))
         if files:
-            st.session_state.cc_df = pd.read_csv(files[-1])
-            st.session_state.cheap_calls_time = f"from file · {os.path.basename(files[-1])}"
-            st.toast("Loaded last saved scan.", icon="📂")
+            try:
+                st.session_state.cc_df = pd.read_csv(files[-1])
+                st.session_state.cheap_calls_time = f"from file · {os.path.basename(files[-1])}"
+                st.toast("Loaded last saved scan.", icon="📂")
+            except Exception as e:
+                st.error(f"Could not load {os.path.basename(files[-1])}: {e}")
         else:
             st.warning("No saved scan found. Click ▶ Scan Now to run one.")
 
@@ -11350,6 +11650,16 @@ def render_stock_analyzer():
     _render()
 
 
+def render_earnings_iv():
+    from earnings_iv_module import render_earnings_iv as _render
+    _render()
+
+
+def render_tqqq_sqqq():
+    from tqqq_sqqq_module import render as _render
+    _render()
+
+
 SCANNERS = [
     {"id": "home",         "label": "🏠  Home",               "category": "home",    "render": render_home},
     {"id": "stock_analyzer", "label": "🔍  Stock Analyzer",     "category": "analyze",   "render": render_stock_analyzer},
@@ -11361,15 +11671,18 @@ SCANNERS = [
     {"id": "breakout",       "label": "💥  Breakout",            "category": "trades",    "render": render_breakout},
     {"id": "ibd",            "label": "📋  IBD Buy Zone",        "category": "trades",    "render": render_ibd},
     {"id": "parabolic_short","label": "📉  Parabolic Short",     "category": "trades",    "render": render_parabolic_short},
+    {"id": "qullamaggie",    "label": "🐢  Qullamaggie",         "category": "trades",    "render": render_qullamaggie},
     {"id": "ema",            "label": "📉  EMA Crossover",       "category": "technical", "render": render_ema},
     {"id": "rsi",            "label": "〰️  RSI Scanner",         "category": "technical", "render": render_rsi},
     {"id": "macd",           "label": "〽️  MACD Scanner",        "category": "technical", "render": render_macd},
     {"id": "gap",            "label": "🕳️  Gap Scanner",          "category": "technical", "render": render_gap},
     {"id": "volume",         "label": "🔊  Volume Surge",        "category": "technical", "render": render_volume},
     {"id": "options_hub",    "label": "⚡  Options Scanner",     "category": "options",   "render": render_options_hub},
+    {"id": "earnings_iv",    "label": "💥  Earnings IV-Crush",   "category": "options",   "render": render_earnings_iv},
     {"id": "opt_paper",      "label": "🟢  Options Paper Trade", "category": "options",   "render": render_options_paper_trade},
     {"id": "opt_log",        "label": "📋  Options Trade Log",   "category": "options",   "render": render_options_log},
     {"id": "opt_backtest",   "label": "🔬  Options Backtest",    "category": "options",   "render": render_options_backtest},
+    {"id": "tqqq_sqqq",      "label": "🚀  TQQQ/SQQQ Ensemble",  "category": "automate",  "render": render_tqqq_sqqq},
     {"id": "spy_alerts",     "label": "📡  SPY Reversal Log",    "category": "automate",  "render": render_spy_alerts},
     {"id": "paper_trade",    "label": "🤖  Paper Trade",         "category": "automate",  "render": render_paper_trade},
     {"id": "backtest",       "label": "📊  Backtest",            "category": "automate",  "render": render_backtest},
