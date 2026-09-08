@@ -9757,14 +9757,14 @@ def render_qullamaggie():
 **The Breakout setup** — a stock that has *already* made a big move (the "momentum leader"),
 pauses in a tight, low-volume flag near its highs, then breaks out.
 
-1. **Momentum** — up 30–100%+ over the last 1–6 months, an RS leader.
-2. **Trend** — price above a rising 10 EMA > 20 EMA > 50 SMA (MAs stacked).
-3. **ADR%** — average daily range ≥ ~3.5% (needs volatility to pay).
-4. **Liquidity** — dollar volume ≥ a few $M so you can get filled.
-5. **The flag** — 1–4 weeks of *contracting* range on *declining* volume, price holding near the 52-wk high.
+1. **Momentum** — a top ~1–2% name by gain over 1-, 3- *and* 6-month windows (percentile-ranked here).
+2. **Trend** — price "surfing" a rising 10-day > 20-day > 50-day MA (stacked & sloping up).
+3. **ADR%** — average daily range ≥ ~3.5% (needs volatility to pay 10–20R).
+4. **Liquidity** — median $ volume ≥ a few $M so you can get filled.
+5. **The base** — 2 weeks–2 months of *higher lows* and *tightening range* on *declining* volume, near the 52-wk high.
 6. **Trigger** — buy the break of the consolidation high on the opening-range (1/5/60-min) high.
-   *Stop* = low of the day / low of the entry candle. Sell ⅓–½ into strength after 3–5 days,
-   trail the rest on the 10- or 20-day MA.
+   *Stop* = low of the day, never wider than ~1 ADR. Sell ⅓–½ after 3–5 days, move stop to breakeven,
+   trail the rest on the 10-day MA (exit on the first daily *close* below it).
 """)
         else:
             st.markdown("""
@@ -9780,114 +9780,147 @@ out of a quiet base.
 
     with st.expander("⚙️ Settings", expanded=False):
         c1, c2, c3, c4 = st.columns(4)
-        qm_min_score = c1.slider("Min checklist score", 3, 9, 6, key="qm_min_score")
+        qm_min_score = c1.slider("Min checklist score", 3, 9, 7, key="qm_min_score")
         qm_adr_min   = c2.slider("Min ADR %", 2.0, 8.0, 3.5, step=0.5, key="qm_adr_min")
         qm_dv_min    = c3.slider("Min $ volume (M)", 1.0, 50.0, 3.0, step=1.0, key="qm_dv_min")
         qm_near_high = c4.slider("Max % below 52-wk high", 5, 50, 25, key="qm_near_high")
 
         c5, c6, c7, c8 = st.columns(4)
         if not is_ep:
-            qm_flag_len  = c5.slider("Flag length (days)", 5, 30, 10, key="qm_flag_len")
-            qm_mom_min   = c6.slider("Min momentum move %", 10, 150, 30, key="qm_mom_min",
-                                     help="Best of 1-/3-/6-month % gain must clear this")
+            qm_flag_len  = c5.slider("Consolidation length (days)", 5, 40, 12, key="qm_flag_len")
+            qm_mom_top   = c6.slider("Momentum-leader percentile", 80, 99, 90, key="qm_mom_top",
+                                     help="Keep only names in the top X% of the universe by best of 1-/3-/6-mo gain")
             qm_arm_pct   = c7.slider("Setup proximity %", 1.0, 10.0, 4.0, step=0.5, key="qm_arm_pct",
                                      help="Show 'setting up' names within this % below the pivot")
-            qm_gap_min = 10.0; qm_vol_mult = 3.0
+            qm_gap_min = 10.0; qm_vol_mult = 3.0; qm_ext_max = 999; qm_mom_min = 25
         else:
             qm_gap_min   = c5.slider("Min gap %", 5.0, 30.0, 10.0, step=1.0, key="qm_gap_min")
             qm_vol_mult  = c6.slider("Min volume × avg", 1.5, 10.0, 3.0, step=0.5, key="qm_vol_mult")
             qm_ext_max   = c7.slider("Max 6-mo move % (not extended)", 30, 250, 100, key="qm_ext_max")
-            qm_flag_len = 10; qm_mom_min = 0; qm_arm_pct = 4.0
+            qm_flag_len = 12; qm_mom_min = 0; qm_arm_pct = 4.0; qm_mom_top = 0
         acct = c8.number_input("Account size ($)", 1000, 10_000_000, 30_000, step=1000, key="qm_acct")
-        qm_risk = st.slider("Risk per trade (% of account)", 0.25, 2.0, 0.5, step=0.25, key="qm_risk")
+        cc1, cc2 = st.columns(2)
+        qm_risk = cc1.slider("Risk per trade (% of account)", 0.25, 2.0, 0.5, step=0.25, key="qm_risk")
+        qm_show_all = cc2.checkbox("Include names still basing (no trigger yet)", value=True, key="qm_show_all")
 
     # ── helpers ──────────────────────────────────────────────────────────────
     @st.cache_data(ttl=1800, show_spinner=False)
     def _qm_daily(symbol):
         try:
-            t = yf.Ticker(symbol)
-            h = t.history(period="14mo", interval="1d").dropna(subset=["Close"])
-            dv = getattr(t.fast_info, "market_cap", None)
-            return h, float(dv or 0)
+            h = yf.Ticker(symbol).history(period="14mo", interval="1d").dropna(subset=["Close"])
+            return h
         except Exception:
-            return pd.DataFrame(), 0.0
+            return pd.DataFrame()
 
     def _rising(s, lb=5):
         return len(s) > lb and s.iloc[-1] > s.iloc[-1 - lb]
 
-    def _scan_one(sym):
-        h, _cap = _qm_daily(sym)
-        if h.empty or len(h) < 60:
+    def _metrics(sym):
+        """Pure per-symbol measurements — no gating (momentum rank needs the whole set)."""
+        h = _qm_daily(sym)
+        if h.empty or len(h) < 130:
             return None
         close, high, low, vol = h["Close"], h["High"], h["Low"], h["Volume"]
-        px      = float(close.iloc[-1])
-        prev    = float(close.iloc[-2])
-        opn     = float(h["Open"].iloc[-1])
-        chg     = (px - prev) / prev * 100 if prev else 0.0
-        ema10   = close.ewm(span=10).mean()
-        ema20   = close.ewm(span=20).mean()
-        sma50   = close.rolling(50).mean()
-        adr_pct = float(((high / low - 1).tail(20).mean()) * 100)
+        px   = float(close.iloc[-1])
+        prev = float(close.iloc[-2])
+        opn  = float(h["Open"].iloc[-1])
+        sma10 = close.rolling(10).mean()
+        sma20 = close.rolling(20).mean()
+        sma50 = close.rolling(50).mean()
+        adr_pct    = float(((high / low).tail(20).mean() - 1) * 100)
         dollar_vol = float((close * vol).tail(20).median())
-        hi_52   = float(high.tail(252).max())
+        hi_52   = float(close.tail(252).max())
         from_hi = (px - hi_52) / hi_52 * 100
         def _mom(n):
-            return (px / float(close.iloc[-1 - n]) - 1) * 100 if len(close) > n else 0.0
+            return (px / float(close.iloc[-1 - n]) - 1) * 100 if len(close) > n else -999.0
         m1, m3, m6 = _mom(21), _mom(63), _mom(126)
-        best_mom = max(m1, m3, m6)
 
+        # Consolidation window = the qm_flag_len bars BEFORE the current bar.
+        cons = h.iloc[-(qm_flag_len + 1):-1]
+        pivot = float(cons["High"].max())
+        c_lo, c_hi = float(cons["Low"].min()), float(cons["High"].max())
+        cons_range = (c_hi - c_lo) / c_lo * 100 if c_lo else 999.0
+        half = max(2, len(cons) // 2)
+        recent_rng = (cons["High"].tail(half).max() - cons["Low"].tail(half).min())
+        prior_rng  = (cons["High"].head(half).max() - cons["Low"].head(half).min())
+        tightening = recent_rng < prior_rng
+        lows = cons["Low"].values
+        hl_slope = float(np.polyfit(np.arange(len(lows)), lows, 1)[0]) if len(lows) > 2 else 0.0
+        higher_lows = hl_slope >= 0
+        base_vol = float(h["Volume"].iloc[-(2 * qm_flag_len + 1):-(qm_flag_len + 1)].mean() or 1)
+        vol_declining = float(cons["Volume"].mean()) < base_vol
+
+        gap_pct = (opn - prev) / prev * 100 if prev else 0.0
+        vol20   = float(vol.tail(20).mean() or 1)
+        vol_x   = float(vol.iloc[-1] / vol20)
+
+        return dict(
+            symbol=sym, px=px, prev=prev, chg=(px - prev) / prev * 100 if prev else 0.0,
+            sma10=float(sma10.iloc[-1]), sma20=float(sma20.iloc[-1]), sma50=float(sma50.iloc[-1]),
+            r10=_rising(sma10), r20=_rising(sma20), r50=_rising(sma50),
+            adr_pct=adr_pct, dollar_vol=dollar_vol, from_hi=from_hi,
+            m1=m1, m3=m3, m6=m6, best_mom=max(m1, m3, m6),
+            pivot=pivot, cons_lo=c_lo, cons_range=cons_range,
+            tightening=tightening, higher_lows=higher_lows, vol_declining=vol_declining,
+            day_low=float(low.iloc[-1]), day_high=float(high.iloc[-1]),
+            gap_pct=gap_pct, vol_x=vol_x,
+        )
+
+    def _evaluate(m):
+        px, pivot = m["px"], m["pivot"]
+        adr_dollar = m["adr_pct"] / 100 * px
         gates, detail = {}, {}
-        gates["ADR% ≥ min"]      = adr_pct >= qm_adr_min
-        gates["Liquidity"]       = dollar_vol >= qm_dv_min * 1e6
-        gates["Near 52-wk high"] = from_hi >= -qm_near_high
-        gates["Trend stacked"]   = px > ema10.iloc[-1] > ema20.iloc[-1] > sma50.iloc[-1]
-        gates["MAs rising"]      = _rising(ema10) and _rising(ema20) and _rising(sma50)
-        detail.update(adr_pct=round(adr_pct, 2), dollar_vol_m=round(dollar_vol / 1e6, 1),
-                      from_hi=round(from_hi, 1), m1=round(m1, 1), m3=round(m3, 1), m6=round(m6, 1))
+        gates["ADR% ≥ min"]      = m["adr_pct"] >= qm_adr_min
+        gates["Liquidity"]       = m["dollar_vol"] >= qm_dv_min * 1e6
+        gates["Near 52-wk high"] = m["from_hi"] >= -qm_near_high
+        gates["Trend stacked"]   = px > m["sma10"] > m["sma20"] > m["sma50"]
+        gates["MAs rising"]      = m["r10"] and m["r20"] and m["r50"]
+        detail.update(adr_pct=round(m["adr_pct"], 2), dollar_vol_m=round(m["dollar_vol"] / 1e6, 1),
+                      from_hi=round(m["from_hi"], 1), m1=round(m["m1"], 1),
+                      m3=round(m["m3"], 1), m6=round(m["m6"], 1))
 
         if not is_ep:
-            flag = h.tail(qm_flag_len)
-            prior = h.iloc[-2 * qm_flag_len:-qm_flag_len] if len(h) >= 2 * qm_flag_len else h.head(qm_flag_len)
-            pivot = float(flag["High"].max())
-            flag_range = (flag["High"].max() - flag["Low"].min()) / flag["Low"].min() * 100
-            prior_range = (prior["High"].max() - prior["Low"].min()) / prior["Low"].min() * 100 if len(prior) else flag_range
-            contracting = flag_range < prior_range
-            vol_declining = flag["Volume"].tail(5).mean() < prior["Volume"].mean() if len(prior) else False
-            triggered = float(high.iloc[-1]) >= pivot and px >= pivot * 0.985
-            arming = (not triggered) and px >= pivot * (1 - qm_arm_pct / 100)
-            gates["Momentum leader"] = best_mom >= qm_mom_min
-            gates["Tight flag"]      = contracting and flag_range <= max(adr_pct * qm_flag_len * 0.6, 3 * adr_pct)
-            gates["Volume drying up"] = bool(vol_declining)
-            gates["Breakout armed"]  = bool(triggered or arming)
-            # Qullamaggie's working stop = low of the breakout day / entry candle.
-            # The flag low is only the wider "disaster" stop.
-            stop = float(low.tail(2).min())
-            disaster_stop = float(flag["Low"].min())
-            detail["disaster_stop"] = round(disaster_stop, 2)
+            # fresh breakout: prior close under the pivot, today's high through it,
+            # and price not yet extended more than ~1 ADR past the pivot.
+            broke_today = m["prev"] < pivot <= m["day_high"]
+            extended    = px > pivot + adr_dollar
+            arming      = (px < pivot) and px >= pivot * (1 - qm_arm_pct / 100)
+            triggered   = broke_today and not extended
+            gates["Momentum leader"]  = m["mom_pct"] >= qm_mom_top
+            gates["Tight base"]       = m["tightening"] and m["higher_lows"] and m["cons_range"] <= 8 * max(m["adr_pct"], 2)
+            gates["Volume dried up"]  = bool(m["vol_declining"])
+            gates["Breakout ready"]   = bool(triggered or arming)
             entry = pivot
-            status = "🔥 TRIGGERED" if triggered else ("👀 SETTING UP" if arming else "· base building")
-            detail.update(pivot=round(pivot, 2), flag_range=round(flag_range, 1),
-                          prior_range=round(prior_range, 1), best_mom=round(best_mom, 1))
+            # stop = low of day, but never wider than ~1 ADR and never at/above entry
+            raw_stop = m["day_low"] if (triggered and m["day_low"] < entry) else entry - adr_dollar
+            stop = min(max(raw_stop, entry - adr_dollar), entry - 0.5 * adr_dollar)
+            status = ("🔥 TRIGGERED" if triggered else
+                      "⏰ EXTENDED" if extended and broke_today else
+                      "👀 SETTING UP" if arming else "· base building")
+            detail.update(pivot=round(pivot, 2), cons_range=round(m["cons_range"], 1),
+                          mom_pct=round(m["mom_pct"], 0), best_mom=round(m["best_mom"], 1))
         else:
-            gap_pct = (opn - prev) / prev * 100 if prev else 0.0
-            vol_x = float(vol.iloc[-1] / vol.tail(20).mean()) if vol.tail(20).mean() else 0.0
-            gates["Gap ≥ min"]       = gap_pct >= qm_gap_min
-            gates["Volume climax"]   = vol_x >= qm_vol_mult
-            gates["Not extended"]    = m6 <= qm_ext_max
-            gates["Above 50 SMA"]    = px > sma50.iloc[-1]
-            entry = float(high.iloc[-1])
-            stop  = float(low.iloc[-1])
-            triggered = px >= entry * 0.985
-            status = "🔥 GAP TODAY" if gap_pct >= qm_gap_min else "· stale gap"
-            detail.update(gap_pct=round(gap_pct, 1), vol_x=round(vol_x, 1))
+            gates["Gap ≥ min"]     = m["gap_pct"] >= qm_gap_min
+            gates["Volume climax"] = m["vol_x"] >= qm_vol_mult
+            gates["Not extended"]  = m["m6"] <= qm_ext_max
+            gates["Above 50 SMA"]  = px > m["sma50"]
+            entry = m["day_high"]
+            raw_stop = m["day_low"] if m["day_low"] < entry else entry - adr_dollar
+            stop = min(max(raw_stop, entry - adr_dollar), entry - 0.5 * adr_dollar)
+            status = "🔥 GAP TODAY" if m["gap_pct"] >= qm_gap_min else "· stale gap"
+            detail.update(gap_pct=round(m["gap_pct"], 1), vol_x=round(m["vol_x"], 1))
 
         score = sum(1 for v in gates.values() if v)
-        risk_pct = (entry - stop) / entry * 100 if entry else 0.0
-        shares = int((acct * qm_risk / 100) / (entry - stop)) if entry > stop else 0
-        return dict(symbol=sym, price=round(px, 2), chg_pct=round(chg, 2), score=score,
-                    n_gates=len(gates), status=status, entry=round(entry, 2), stop=round(stop, 2),
-                    risk_pct=round(risk_pct, 2), target_1r=round(entry + (entry - stop), 2),
-                    shares=shares, gates=gates, detail=detail)
+        rps = entry - stop
+        risk_pct = rps / entry * 100 if entry else 0.0
+        shares = int((acct * qm_risk / 100) / rps) if rps > 0 else 0
+        # cap position at 20% of account (Qullamaggie's typical max single position)
+        shares = min(shares, int(acct * 0.20 / entry)) if entry else 0
+        return dict(symbol=m["symbol"], price=round(px, 2), chg_pct=round(m["chg"], 2),
+                    score=score, n_gates=len(gates), status=status,
+                    entry=round(entry, 2), stop=round(stop, 2), risk_pct=round(risk_pct, 2),
+                    target_1r=round(entry + rps, 2), shares=max(shares, 0),
+                    gates=gates, detail=detail)
 
     if "qm_results" not in st.session_state:
         st.session_state.qm_results = []
@@ -9897,20 +9930,32 @@ out of a quiet base.
         syms = get_selected_tickers()
         _ticker_count_caption(syms)
         prog = st.progress(0, text="Scanning…")
-        raw, done = [], 0
+        mets, done = [], 0
         with ThreadPoolExecutor(max_workers=8) as pool:
-            futs = {pool.submit(_scan_one, s): s for s in syms}
+            futs = {pool.submit(_metrics, s): s for s in syms}
             for fut in as_completed(futs):
                 done += 1
                 prog.progress(done / len(syms), text=f"Scanned {done}/{len(syms)}")
                 try:
-                    row = fut.result()
-                    if row and row["score"] >= qm_min_score:
-                        raw.append(row)
+                    mm = fut.result()
+                    if mm:
+                        mets.append(mm)
                 except Exception:
                     pass
         prog.empty()
-        raw.sort(key=lambda x: (-x["score"], -x["detail"].get("best_mom", x["detail"].get("gap_pct", 0))))
+        # momentum percentile across the whole scanned universe
+        bm = np.array([x["best_mom"] for x in mets]) if mets else np.array([])
+        for x in mets:
+            x["mom_pct"] = float((bm < x["best_mom"]).mean() * 100) if len(bm) else 0.0
+        scored = [_evaluate(x) for x in mets]
+        drop_base = (not is_ep) and not qm_show_all
+        raw = [r for r in scored
+               if r["score"] >= qm_min_score
+               and not (drop_base and r["status"] == "· base building")
+               and not (not is_ep and r["status"] == "⏰ EXTENDED")]
+        _rank = {"🔥 TRIGGERED": 0, "🔥 GAP TODAY": 0, "👀 SETTING UP": 1}
+        raw.sort(key=lambda r: (_rank.get(r["status"], 2), -r["score"],
+                                -r["detail"].get("best_mom", r["detail"].get("gap_pct", 0))))
         st.session_state.qm_results = raw
         st.session_state.qm_last_time = datetime.now().strftime("%Y-%m-%d %H:%M")
         if raw:
@@ -9963,11 +10008,16 @@ out of a quiet base.
         else:                          bg = ""
         return [bg] * len(row)
 
+    def _pct(v, sign=False):
+        if not isinstance(v, (int, float)):
+            return "—"
+        return f"{v:+.1f}%" if sign else f"{v:.1f}%"
     st.dataframe(
         tbl.style.apply(_color, axis=1).format({
-            "Risk %": "{:.2f}%", "1m %": "{:+.0f}%", "3m %": "{:+.0f}%",
-            "6m %": "{:+.0f}%", "% < 52wH": "{:.1f}%", "ADR %": "{:.1f}%",
-            "Gap %": "{:+.1f}%",
+            "Risk %": lambda v: _pct(v), "1m %": lambda v: _pct(v, True),
+            "3m %": lambda v: _pct(v, True), "6m %": lambda v: _pct(v, True),
+            "% < 52wH": lambda v: _pct(v), "ADR %": lambda v: _pct(v),
+            "Gap %": lambda v: _pct(v, True),
         }),
         use_container_width=True, hide_index=True,
         height=min(600, 55 + 36 * len(tbl)),
@@ -9990,8 +10040,7 @@ out of a quiet base.
             with pc:
                 st.markdown("**Trade plan**")
                 st.write(f"Entry (pivot / gap-day high): **${r['entry']:,.2f}**")
-                st.write(f"Stop (low of breakout day): **${r['stop']:,.2f}**"
-                         + (f"  ·  disaster stop ${d['disaster_stop']:,.2f}" if 'disaster_stop' in d else ""))
+                st.write(f"Stop (low of day, capped at ~1 ADR): **${r['stop']:,.2f}**")
                 st.write(f"1R target (trim ⅓–½): **${r['target_1r']:,.2f}**")
                 st.write(f"Size @ {st.session_state.get('qm_risk', 0.5)}% risk: **{r['shares']} sh** "
                          f"(≈${r['shares'] * r['entry']:,.0f})")
@@ -10000,7 +10049,7 @@ out of a quiet base.
                 f"ADR **{d.get('adr_pct','–')}%** · $Vol **{d.get('dollar_vol_m','–')}M** · "
                 f"**{d.get('from_hi','–')}%** from 52-wk high · "
                 f"Momentum 1m **{d.get('m1','–')}%** / 3m **{d.get('m3','–')}%** / 6m **{d.get('m6','–')}%**"
-                + (f" · Flag range **{d['flag_range']}%** vs prior **{d['prior_range']}%**" if 'flag_range' in d else "")
+                + (f" · Base range **{d['cons_range']}%** · momentum pctile **{d.get('mom_pct','–')}**" if 'cons_range' in d else "")
                 + (f" · Gap **{d['gap_pct']}%** on **{d['vol_x']}×** volume" if 'gap_pct' in d else "")
             )
 
