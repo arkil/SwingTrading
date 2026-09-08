@@ -9907,7 +9907,12 @@ out of a quiet base.
             entry = m["day_high"]
             raw_stop = m["day_low"] if m["day_low"] < entry else entry - adr_dollar
             stop = min(max(raw_stop, entry - adr_dollar), entry - 0.5 * adr_dollar)
-            status = "🔥 GAP TODAY" if m["gap_pct"] >= qm_gap_min else "· stale gap"
+            if m["gap_pct"] < qm_gap_min:
+                status = "· stale gap"
+            elif px < entry * 0.97:
+                status = "📉 GAP FADED"          # ran to the ORH then reversed — no clean entry left
+            else:
+                status = "🔥 GAP TODAY"
             detail.update(gap_pct=round(m["gap_pct"], 1), vol_x=round(m["vol_x"], 1))
 
         score = sum(1 for v in gates.values() if v)
