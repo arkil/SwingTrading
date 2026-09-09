@@ -32,11 +32,16 @@ if os.path.exists(_env_file):
                 _k, _, _v = _line.partition("=")
                 os.environ.setdefault(_k.strip(), _v.strip().strip("'\""))
 
-_VOL_SCANNER_PATH = os.path.normpath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "volume_scanner")
-)
-if os.path.isdir(_VOL_SCANNER_PATH):
-    sys.path.insert(0, _VOL_SCANNER_PATH)
+_HERE = os.path.dirname(__file__)
+# Volume Scanner's core/indicators/models packages. Prefer the copy vendored
+# into this repo (works on Streamlit Cloud); fall back to the sibling checkout.
+for _vs_path in (
+    os.path.join(_HERE, "vendor", "volume_scanner"),
+    os.path.normpath(os.path.join(_HERE, "..", "..", "volume_scanner")),
+):
+    if os.path.isdir(os.path.join(_vs_path, "core")):
+        sys.path.insert(0, _vs_path)
+        break
 
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
