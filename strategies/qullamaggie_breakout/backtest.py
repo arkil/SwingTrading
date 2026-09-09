@@ -147,7 +147,7 @@ def find_setup(d: pd.DataFrame, i: int, mom_pctile: float, mp: float, prm: dict)
         return None
     if np.isnan(mp) or mp < mom_pctile:
         return None
-    base = d.iloc[i - 1 - W:i - 1]
+    base = d.iloc[i - W:i]          # the W completed bars before today (bar i)
     if len(base) < W:
         return None
     pivot = float(base["High"].max())
@@ -165,7 +165,7 @@ def find_setup(d: pd.DataFrame, i: int, mom_pctile: float, mp: float, prm: dict)
     lows = base["Low"].values
     if np.polyfit(np.arange(len(lows)), lows, 1)[0] < 0:   # higher lows
         return None
-    base_vol = d["Volume"].iloc[i - 1 - 2 * W:i - 1 - W].mean()
+    base_vol = d["Volume"].iloc[i - 2 * W:i - W].mean()
     if not (base["Volume"].mean() < base_vol):
         return None
     if row.Close >= pivot:            # already broken out
@@ -237,6 +237,7 @@ def run(data, spy, mom_pct, prm: dict, verbose=True):
         regime_ok = (not prm["regime_filter"]) or (srow.Close > srow.sma200)
 
         # ---- new entries ----
+        prev_day = cal[t - 1]
         if regime_ok and len(open_pos) < prm["max_positions"]:
             invested = sum(p["shares"] * data[p_s]["Close"].get(day, p["entry"])
                            for p_s, p in open_pos.items())
@@ -248,7 +249,8 @@ def run(data, spy, mom_pct, prm: dict, verbose=True):
                 if day not in d.index:
                     continue
                 i = d.index.get_loc(day)
-                mp = mom_pct[s].iloc[mom_pct.index.get_loc(day)] if day in mom_pct.index else np.nan
+                # momentum percentile as of the PRIOR close (no look-ahead on entry day)
+                mp = mom_pct[s].get(prev_day, np.nan) if s in mom_pct.columns else np.nan
                 setup = find_setup(d, i, prm["mom_pctile"], mp, prm)
                 if not setup:
                     continue
@@ -257,14 +259,16 @@ def run(data, spy, mom_pct, prm: dict, verbose=True):
                     continue
                 entry = max(bar.Open, setup["pivot"]) * (1 + slip)
                 adr_dollar = d.iloc[i - 1].adr / 100 * entry
+                if adr_dollar <= 0:
+                    continue
                 raw_stop = bar.Low if bar.Low < entry else entry - adr_dollar
                 stop = min(max(raw_stop, entry - adr_dollar), entry - 0.5 * adr_dollar)
-                if stop >= entry or adr_dollar <= 0:
+                if stop >= entry:
                     continue
-                cands.append((d.iloc[i - 1].best_mom, s, entry, stop, bar, mp))
+                cands.append((float(d.iloc[i - 1].best_mom), s, entry, stop, bar, i, mp))
 
-            cands.sort(reverse=True)   # strongest momentum first
-            for _bm, s, entry, stop, bar, mp in cands:
+            cands.sort(key=lambda c: -c[0])   # strongest prior-bar momentum first
+            for _bm, s, entry, stop, bar, i, mp in cands:
                 if len(open_pos) >= prm["max_positions"]:
                     break
                 risk_dollar = equity * prm["risk_per_trade"]
@@ -276,6 +280,11 @@ def run(data, spy, mom_pct, prm: dict, verbose=True):
                 if invested + shares * entry > equity:      # no leverage
                     continue
                 invested += shares * entry
+                # NOTE: no same-day stop-out. On a real breakout the entry is the
+                # intraday opening-range high; the daily bar's low very often prints
+                # BEFORE that breakout (morning dip -> afternoon break), so
+                # "day low < stop" does not imply the stop was hit after entry.
+                # Management starts on the next bar (standard daily-backtest convention).
                 open_pos[s] = dict(
                     entry=entry, stop=stop, shares=shares, bars=0, trimmed=False,
                     realized=0.0, risk_dollar=shares * rps, entry_date=day, mom_pct=float(mp),

@@ -1,6 +1,10 @@
 # Qullamaggie Breakout — Research & Backtest Report
 
-_Last run: 2026-09-08 · `backtest.py` · 514-symbol universe · 2016–2026 (10.7 yrs)_
+_Last run: 2026-09-09 · `backtest.py` · 514-symbol universe · 2016–2026 (10.7 yrs)_
+
+> **2026-09-09 correction.** The first version of this report (+0.31R / 5.1 % CAGR)
+> contained a look-ahead bug in the momentum-leader rank. Fixed; the honest base
+> case is **+0.13R / 2.1 % CAGR / −20.5 % DD** — see bug #9 and §3.
 
 ---
 
@@ -44,45 +48,54 @@ because it needs the catalyst + intraday data to model honestly.
 | 6 | EMA 10/20 for the trend stack | Qullamaggie's charts use simple 10/20/50 | switched to SMA 10/20/50 |
 | 7 | Table `.format()` strings applied to possibly-empty cells | Streamlit `ValueError` risk | numeric-guarded formatter lambdas |
 | 8 | EP: `🔥 GAP TODAY` shown even when price had faded far below the entry | misleading — no clean entry left | added `📉 GAP FADED` when `price < entry·0.97` |
+| 9 | **Backtest only** — momentum percentile was read on the *entry day's* close (`m1 = close[t]/close[t-21]`), i.e. look-ahead: it ranked leaders using a price not yet known when the intraday breakout fires | inflated the base case to +0.31R / 5.1 % CAGR / −11 % DD | rank momentum as of the **prior** close (`mom_pct.get(prev_day)`); honest result is +0.13R / 2.1 % CAGR / −20.5 % DD (§3) |
+| 10 | **Backtest only** — consolidation window was `d.iloc[i-1-W:i-1]`, off by one (dropped yesterday, kept an extra old bar); `cands.sort(reverse=True)` on raw tuples would raise on a momentum tie (compares a `Series`) | subtle base mis-placement; latent crash | window is now the `W` completed bars before today; sort by an explicit key |
 
 Result: the breakout scan went from **163 candidates → ~25**, "triggered" from 44 → ~13,
-and every stop/risk figure is now sane.
+every stop/risk figure is sane — and the backtest's headline edge shrank by more than
+half once the look-ahead was removed.
 
 ---
 
-## 3. Backtest results — base case
+## 3. Backtest results — base case (look-ahead removed)
 
 ```
 Period               10.7 yrs
-Final equity         $169,859   (from $100,000)
-CAGR                    5.1 %    (SPY buy & hold 15.0 %)
-Max drawdown          -11.2 %    (SPY -33.7 %)
-Sharpe (daily)          0.57
-Trades                  422
-Win rate               34.1 %
-Expectancy            +0.31 R
-Avg win / avg loss   +2.94R / -1.05R
-Profit factor           1.36
-Best / worst trade   +22.1R / -4.2R
+Final equity         $124,903   (from $100,000)
+CAGR                    2.1 %    (SPY buy & hold 15.0 %)
+Max drawdown          -20.5 %    (SPY -33.7 %)
+Sharpe (daily)          0.26
+Trades                  488
+Win rate               32.0 %
+Expectancy            +0.13 R
+Avg win / avg loss   +2.68R / -1.06R
+Profit factor           1.14
+Best / worst trade   +22.2R / -3.4R
 Avg holding             5 bars
 ```
+
+> The first pass reported +0.31R / 5.1 % CAGR / −11 % DD. That was **look-ahead
+> bias** (bug #9): the momentum-leader rank used the entry day's own close. With
+> the rank taken as of the prior close, most of the edge disappears — the honest
+> read is a **thin positive expectancy that does not stand on its own**.
 
 ### By year
 | Year | Strat % | Strat maxDD | Trades | Win % | Exp R | SPY % |
 |---|---|---|---|---|---|---|
-| 2016 | +3.9 | -2.2 | 12 | 42 | +0.74 | +9 |
-| 2017 | +0.2 | -2.9 | 6 | 33 | +0.03 | +19 |
-| 2018 | +6.8 | -3.0 | 30 | 30 | +0.55 | -6 |
-| 2019 | -1.6 | -4.7 | 23 | 26 | -0.14 | +29 |
-| 2020 | +20.0 | -8.8 | 66 | 36 | +0.67 | +16 |
-| 2021 | +3.6 | -7.5 | 53 | 28 | +0.20 | +27 |
-| 2022 | -3.5 | -6.0 | 30 | 27 | -0.18 | -18 |
-| 2023 | +6.3 | -4.5 | 20 | 60 | +0.68 | +24 |
-| 2024 | +14.9 | -5.8 | 46 | 35 | +0.64 | +23 |
-| 2025 | +2.5 | -7.5 | 65 | 37 | +0.14 | — |
-| 2026 YTD | +2.7 | -9.9 | 71 | 32 | +0.10 | — |
+| 2016 | +6.6 | -2.2 | 11 | 55 | +1.53 | +9 |
+| 2017 | -0.1 | -2.9 | 7 | 29 | -0.12 | +19 |
+| 2018 | -4.5 | -5.6 | 38 | 21 | -0.23 | -6 |
+| 2019 | -5.3 | -7.5 | 31 | 23 | -0.34 | +29 |
+| 2020 | +3.1 | -15.1 | 80 | 32 | +0.14 | +16 |
+| 2021 | -1.6 | -8.3 | 56 | 25 | -0.08 | +27 |
+| 2022 | -4.8 | -7.7 | 29 | 24 | -0.27 | -18 |
+| 2023 | +16.7 | -3.0 | 26 | 58 | +1.05 | +24 |
+| 2024 | +1.4 | -8.9 | 54 | 35 | +0.18 | +23 |
+| 2025 | +9.8 | -5.4 | 73 | 38 | +0.36 | — |
+| 2026 YTD | +2.7 | -11.2 | 83 | 29 | +0.09 | — |
 
-Equity curve: `equity.png` · every trade: `trades.csv`
+Six of ten full years are flat-to-down. The edge is concentrated in 2016, 2023 and
+2025; 2018–2019 and 2021–2022 lose money. Equity curve: `equity.png` · trades: `trades.csv`
 
 ---
 
@@ -90,64 +103,68 @@ Equity curve: `equity.png` · every trade: `trades.csv`
 
 | Knob | Value | CAGR | MaxDD | Trades | Win% | Exp R | Sharpe |
 |---|---|---|---|---|---|---|---|
-| **cons_len** | 8 | 4.2 | -11.7 | 485 | 35 | +0.23 | 0.49 |
-| | **12** | **5.1** | **-11.2** | **422** | **34** | **+0.31** | **0.57** |
-| | 16 | 4.8 | -12.9 | 327 | 37 | +0.36 | 0.60 |
-| | 20 | 5.2 | -7.9 | 262 | 38 | +0.48 | 0.68 |
-| **mom_pctile** | 0.80 | 5.6 | -15.9 | 484 | 34 | +0.30 | 0.60 |
-| | **0.90** | 5.1 | -11.2 | 422 | 34 | +0.31 | 0.57 |
-| | 0.95 | 4.9 | -11.8 | 350 | 34 | +0.36 | 0.59 |
-| | 0.98 | 4.8 | -11.2 | 209 | 35 | +0.56 | 0.74 |
-| **adr_min** | 2.5 | 5.8 | -15.0 | 906 | 33 | +0.23 | 0.53 |
-| | **3.5** | 5.1 | -11.2 | 422 | 34 | +0.31 | 0.57 |
-| | 5.0 | 3.0 | -8.8 | 136 | 37 | +0.50 | 0.56 |
-| **partial_day** | 3 | 6.2 | -11.5 | 438 | 37 | +0.36 | 0.70 |
-| | **4** | 5.1 | -11.2 | 422 | 34 | +0.31 | 0.57 |
-| | 5 | 5.6 | -11.3 | 419 | 33 | +0.34 | 0.60 |
-| | 8 | 6.0 | -14.0 | 406 | 28 | +0.37 | 0.61 |
-| **cons_range_mult** | 5.0 | 4.9 | -11.7 | 346 | 34 | +0.36 | 0.61 |
-| | **8.0** | 5.1 | -11.2 | 422 | 34 | +0.31 | 0.57 |
-| | 12.0 | 5.0 | -11.2 | 423 | 34 | +0.31 | 0.57 |
-| **regime_filter** | **True** | 5.1 | -11.2 | 422 | 34 | +0.31 | 0.57 |
-| | False | 5.8 | -13.6 | 520 | 35 | +0.29 | 0.60 |
+| **cons_len** | 8 | 5.5 | -17.0 | 575 | 34 | +0.24 | 0.54 |
+| | **12** | **2.1** | **-20.5** | **488** | **32** | **+0.13** | **0.26** |
+| | 16 | 4.0 | -16.1 | 393 | 34 | +0.27 | 0.48 |
+| | 20 | 3.0 | -18.3 | 320 | 34 | +0.26 | 0.40 |
+| **mom_pctile** | 0.80 | 2.5 | -24.2 | 552 | 32 | +0.13 | 0.29 |
+| | **0.90** | 2.1 | -20.5 | 488 | 32 | +0.13 | 0.26 |
+| | 0.95 | 2.2 | -18.0 | 392 | 32 | +0.15 | 0.28 |
+| | 0.98 | 2.2 | -12.7 | 238 | 31 | +0.23 | 0.33 |
+| **adr_min** | 2.5 | 3.3 | -21.3 | 1040 | 33 | +0.16 | 0.31 |
+| | **3.5** | 2.1 | -20.5 | 488 | 32 | +0.13 | 0.26 |
+| | **5.0** | **3.0** | **-9.7** | **137** | **40** | **+0.48** | **0.52** |
+| **partial_day** | 3 | 2.5 | -16.0 | 506 | 35 | +0.15 | 0.31 |
+| | **4** | 2.1 | -20.5 | 488 | 32 | +0.13 | 0.26 |
+| | 5 | 2.4 | -20.9 | 483 | 30 | +0.15 | 0.28 |
+| | 8 | 2.9 | -23.7 | 466 | 25 | +0.19 | 0.31 |
+| **cons_range_mult** | 5.0 | 2.4 | -19.5 | 414 | 32 | +0.16 | 0.31 |
+| | **8.0** | 2.1 | -20.5 | 488 | 32 | +0.13 | 0.26 |
+| | 12.0 | 2.0 | -20.3 | 490 | 32 | +0.13 | 0.25 |
+| **regime_filter** | **True** | 2.1 | -20.5 | 488 | 32 | +0.13 | 0.26 |
+| | False | 1.1 | -26.0 | 593 | 33 | +0.08 | 0.16 |
 
-Dropping the SPY-200 **regime filter** raises CAGR to 5.8 % but deepens the drawdown
-to -13.6 % and adds 100 marginal trades at lower expectancy — keep the filter on.
-`cons_range_mult` is inert between 8 and 12 (the higher-lows / tightening tests already
-bind first).
-
-**Read:** expectancy is **positive in every single configuration** (+0.23R to +0.56R).
-The trade-off is monotonic — more selective (longer base, higher momentum percentile,
-higher ADR floor) → higher expectancy and Sharpe, fewer trades, similar-or-lower CAGR.
-Nothing is fragile; there is no cliff.
+**Read:**
+* Expectancy stays **positive in all 20 configs (+0.08R to +0.48R)** — the sign of
+  the edge is robust, its *size* is not: at the base parameters it is barely above
+  break-even (+0.13R, PF 1.14).
+* `cons_len = 12` is an unlucky local dip — 8/16/20 all do better (+0.24–0.27R).
+  Don't read anything into the exact base number.
+* The **one genuinely interesting pocket is `adr_min = 5.0`**: only high-volatility
+  names, 137 trades in 10 yrs, but +0.48R, 40 % win, −9.7 % DD, Sharpe 0.52. The
+  edge lives in the most volatile leaders and is diluted by everything else.
+* Keep the **regime filter on** (off → +0.08R, −26 % DD).
 
 ---
 
 ## 5. Verdict
 
-**The edge is real but small, and the standalone equity curve lags the index.**
+**A thin, real, but not standalone-tradeable edge — on this daily-bar model.**
 
-* Positive, statistically meaningful expectancy (+0.31R over 422 trades, robust to
-  every parameter) with a **right-skewed** payoff — 34 % win rate, +2.94R average
-  winner, capped ~1R losers. This is a textbook trend-continuation profile.
-* Drawdown is **1/3 of buy-and-hold** (-11 % vs -34 %) and the worst years are shallow
-  (2022: -3.5 % while SPY -18 %).
-* **But** CAGR is only ~5 % vs SPY's 15 %, because the portfolio is ~80 % in cash:
-  0.5 % risk/trade + a 5-bar average hold means rarely more than 1–2 positions on at
-  once. The system extracts its edge in bursts (2020 +20 %, 2024 +15 %) and treads
-  water the rest of the time, missing the bull runs of 2017/2019/2021.
+* Expectancy is positive and its *sign* survives every parameter perturbation
+  (+0.08R to +0.48R), so the checklist does select forward-better-than-random names.
+  But at sensible parameters it is **+0.13R with PF 1.14** — after real slippage,
+  commissions and the survivorship haircut (§6), that is plausibly zero.
+* 2.1 % CAGR vs SPY's 15 %, with a **worse risk-adjusted profile** than the first
+  (biased) pass suggested: −20.5 % drawdown, Sharpe 0.26, six of ten years flat-to-red.
+* The payoff is still right-skewed (32 % win, +2.68R winners, −1.06R losers) — the
+  trend-continuation shape is there, just not enough of it.
+* The daily bar is doing real damage here: no opening-range-high timing, no intraday
+  stop, close-fills on trims. Qullamaggie's results come from **intraday execution**
+  this model cannot see (§6.2). This backtest should be read as a *floor*, not a verdict
+  on his method.
 
 ### How to actually use it
-1. **Signal generator (recommended).** Use the dashboard scanner for the daily
-   candidate list; size discretionarily. The backtest confirms the checklist selects
-   names with a genuine forward edge.
-2. **Low-drawdown satellite sleeve.** Allocate 20–40 % of capital; accept the lower
-   absolute return for the drawdown protection and low correlation to a core index
-   position.
-3. **Scale up risk** to 1–1.5 %/trade and raise `max_positions` if you will tolerate
-   ~20–25 % drawdowns — moves CAGR toward the low teens but no longer "sleep at night".
-4. Best single tweak found: **`partial_day = 3`** (trim on day 3, not 4) → CAGR 6.2 %,
-   Sharpe 0.70, same drawdown.
+1. **Signal / watchlist generator only.** The dashboard scanner is fine for surfacing
+   the daily candidate list; the backtest does *not* justify a mechanical daily-bar
+   version of it.
+2. **If you want a mechanical sleeve, trade the `adr_min ≥ 5` subset** — high-volatility
+   leaders only. That is the sole cut with a Sharpe (0.52) and drawdown (−9.7 %) worth
+   the screen time, at ~13 trades/year.
+3. **Do the intraday work.** The setup needs 1/5-min data for the ORH entry and a
+   same-day low-of-day stop to be evaluated (or traded) properly. Until then, treat any
+   daily-bar P&L as an underestimate of a well-executed version and an overestimate of
+   a sloppy one.
 
 ---
 
@@ -161,6 +178,10 @@ Nothing is fragile; there is no cliff.
    for the ORH" timing that both cuts losers faster and gets worse fills on gaps.
 3. **Partial & trail fills are modelled at the close**, not intraday into strength —
    mildly optimistic on the trims, mildly pessimistic on the trails.
+   **No same-day stop-out**: position management starts on the bar *after* entry.
+   Modelling a same-day stop when `low < stop` was tried and rejected — on a real
+   breakout the daily low usually prints in the morning *before* the afternoon break,
+   so that assumption is a severe pessimistic bias (it drove expectancy to −0.33R).
 4. Slippage 5 bps/side; **no commissions, no hard-to-borrow, no dividends on the
    short side** (breakout is long-only so the latter two don't bite here).
 5. EP setup is **not** backtested — needs catalyst + premarket volume data.

@@ -9750,6 +9750,13 @@ def render_qullamaggie():
         scan_key="qm_scan_btn", last_key="qm_last_time",
     )
 
+    st.caption(
+        "⚠️ Watchlist / idea generator. A faithful daily-bar backtest of the breakout "
+        "(`strategies/qullamaggie_breakout/`) shows only a **thin edge** — +0.13R "
+        "expectancy, 2.1% CAGR, −20.5% max DD over 2016–2026 — because it can't model the "
+        "intraday opening-range entry. Best pocket: names with ADR ≥ 5%. Size discretionarily."
+    )
+
     mode = st.radio(
         "Setup", ["💥 Breakout (flag continuation)", "📣 Episodic Pivot (gap on news)"],
         horizontal=True, key="qm_mode", label_visibility="collapsed",
