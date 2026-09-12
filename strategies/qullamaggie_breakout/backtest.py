@@ -42,20 +42,27 @@ DATA.mkdir(exist_ok=True)
 START = "2015-06-01"
 END = pd.Timestamp.today().strftime("%Y-%m-%d")
 
-# ── strategy parameters (base case) ─────────────────────────────────────────
+# ── strategy parameters ──────────────────────────────────────────────────────
+# Optimized via optimize.py (2026-09-12): a 30-combo grid over cons_len x
+# mom_pctile x adr_min, scored on train (<2023) Sharpe and confirmed on test
+# (>=2023) out-of-sample, then a capital-deployment pass (risk/max_positions/
+# partial_day). cons_len=16 (vs. the original 12) and adr_min=4.5 (vs. 3.5) are
+# the two levers that matter; max_positions never binds (candidate-constrained,
+# not slot-constrained) and risk_per_trade above 0.5% only adds drawdown. See
+# REPORT.md "Optimization" section for the full grid and the train/test split.
 P = dict(
-    cons_len=12,          # consolidation window, trading days
-    mom_pctile=0.90,      # keep names in the top (1 - x) of the universe by momentum
-    adr_min=3.5,          # minimum 20-day ADR %
+    cons_len=16,          # consolidation window, trading days (was 12)
+    mom_pctile=0.95,      # keep names in the top (1 - x) of the universe by momentum (was 0.90)
+    adr_min=4.5,          # minimum 20-day ADR % (was 3.5)
     dv_min=3_000_000,     # minimum 20-day median dollar volume
     near_high=0.25,       # max fraction below the 52-week high
     cons_range_mult=8.0,  # base range must be <= this * ADR%
-    partial_day=4,        # sessions held before trimming half
+    partial_day=5,        # sessions held before trimming half (was 4)
     partial_frac=0.5,
     max_hold=60,          # hard time stop, trading days
-    risk_per_trade=0.005, # 0.5 % of equity
+    risk_per_trade=0.005, # 0.5 % of equity — higher only adds drawdown, not return
     pos_cap=0.20,         # 20 % of equity max per position
-    max_positions=10,
+    max_positions=10,     # never binds at these filters; raising it changes nothing
     slippage_bps=5,
     regime_filter=True,
     start_equity=100_000.0,

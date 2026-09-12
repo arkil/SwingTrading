@@ -9751,10 +9751,11 @@ def render_qullamaggie():
     )
 
     st.caption(
-        "⚠️ Watchlist / idea generator. A faithful daily-bar backtest of the breakout "
-        "(`strategies/qullamaggie_breakout/`) shows only a **thin edge** — +0.13R "
-        "expectancy, 2.1% CAGR, −20.5% max DD over 2016–2026 — because it can't model the "
-        "intraday opening-range entry. Best pocket: names with ADR ≥ 5%. Size discretionarily."
+        "⚠️ Low-frequency sleeve, not a scalper. The optimized daily-bar backtest "
+        "(`strategies/qullamaggie_breakout/`, defaults above) shows +0.65R expectancy, "
+        "4.3% CAGR, −11.3% max DD, Sharpe 0.66 over 2016–2026 (~15 trades/yr, confirmed "
+        "out-of-sample 2023–2026) — still a daily-bar proxy for his intraday opening-range "
+        "entry, so treat it as a floor. See REPORT.md before sizing up risk/trade."
     )
 
     mode = st.radio(
@@ -9793,14 +9794,14 @@ out of a quiet base.
     with st.expander("⚙️ Settings", expanded=False):
         c1, c2, c3, c4 = st.columns(4)
         qm_min_score = c1.slider("Min checklist score", 3, 9, 7, key="qm_min_score")
-        qm_adr_min   = c2.slider("Min ADR %", 2.0, 8.0, 3.5, step=0.5, key="qm_adr_min")
+        qm_adr_min   = c2.slider("Min ADR %", 2.0, 8.0, 4.5, step=0.5, key="qm_adr_min")
         qm_dv_min    = c3.slider("Min $ volume (M)", 1.0, 50.0, 3.0, step=1.0, key="qm_dv_min")
         qm_near_high = c4.slider("Max % below 52-wk high", 5, 50, 25, key="qm_near_high")
 
         c5, c6, c7, c8 = st.columns(4)
         if not is_ep:
-            qm_flag_len  = c5.slider("Consolidation length (days)", 5, 40, 12, key="qm_flag_len")
-            qm_mom_top   = c6.slider("Momentum-leader percentile", 80, 99, 90, key="qm_mom_top",
+            qm_flag_len  = c5.slider("Consolidation length (days)", 5, 40, 16, key="qm_flag_len")
+            qm_mom_top   = c6.slider("Momentum-leader percentile", 80, 99, 95, key="qm_mom_top",
                                      help="Keep only names in the top X% of the universe by best of 1-/3-/6-mo gain")
             qm_arm_pct   = c7.slider("Setup proximity %", 1.0, 10.0, 4.0, step=0.5, key="qm_arm_pct",
                                      help="Show 'setting up' names within this % below the pivot")
