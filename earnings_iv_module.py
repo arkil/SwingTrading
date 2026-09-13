@@ -156,8 +156,17 @@ def _chain(symbol: str, expiry: str):
 
 
 def _chain_impl(symbol: str, expiry: str):
-    ch = _retry(lambda: yf.Ticker(symbol).option_chain(expiry), label=f"{symbol} {expiry} chain")
-    return ch.calls, ch.puts
+    # yfinance's option_chain() is a 3-tuple, so _retry's len()==0 check never
+    # trips even when .calls / .puts come back None or empty under load. Validate
+    # here and return a falsy value so _retry actually retries, and so the caller
+    # gets a clean "chain load failed" instead of an AttributeError on .dropna().
+    def _pull():
+        ch = yf.Ticker(symbol).option_chain(expiry)
+        calls, puts = getattr(ch, "calls", None), getattr(ch, "puts", None)
+        if calls is None or puts is None or calls.empty or puts.empty:
+            return None
+        return calls, puts
+    return _retry(_pull, label=f"{symbol} {expiry} chain")
 
 
 def _atm_iv(calls, puts, spot):
@@ -420,6 +429,21 @@ def _payoff_fig(strat, spot, lo, hi, dark=False):
 # --------------------------------------------------------------------------- #
 # Core analysis — pure, cached, no st.* output.  Shared by single view + scanner.
 # --------------------------------------------------------------------------- #
+def _market_regime():
+    """(label, note) for the macro regime. TTL-cached upstream (~5 min); never
+    raises — a data hiccup must not break the pure analysis / nightly prefetch."""
+    try:
+        from market_context import get_regime_summary
+        s = get_regime_summary()
+        v, sp = s.get("vix", {}), s.get("spy", {})
+        lvl, rk = v.get("level"), v.get("rank_1y")
+        note = (f"VIX {lvl:.0f} ({rk:.0f}%ile) · SPY {sp.get('trend', '?').lower()}"
+                if lvl is not None and rk is not None else "")
+        return s.get("label", "NEUTRAL"), note
+    except Exception:
+        return "NEUTRAL", ""
+
+
 def _analyze_impl(symbol: str, live: bool = False) -> dict:
     """Full IV-crush read for one ticker. Returns a dict with either
     {"error": "..."} or all computed fields + verdict + strat.
@@ -473,8 +497,19 @@ def _analyze_impl(symbol: str, live: bool = False) -> dict:
     straddle_pct = _straddle_pct(fc, fp, spot) or (front_iv * math.sqrt(T_front) * 100.0)
     earn_move = _earnings_implied_move(front_iv, back_iv, T_front)
     hmoves = _hist_earnings_moves(data["hist"], data["past_earn"])
-    hist_avg = float(np.mean(hmoves)) if hmoves else None
+    # Median, not mean — one blow-out print (e.g. an AI-capex quarter) shouldn't
+    # drag the "typical move" up and make a genuinely rich straddle look fair.
+    hist_avg = float(np.median(hmoves)) if hmoves else None
     hist_max = float(np.max(hmoves)) if hmoves else None
+    hist_n = len(hmoves)
+    hist_thin = 0 < hist_n < 4          # too few prints to trust the ratio
+
+    # ── earnings-date sanity (P4): flag rows whose next date sits at an
+    # implausible distance from the last one — usually a stale / duplicate
+    # yfinance row rather than a real confirmed date.
+    _past = data.get("past_earn") or []
+    _gap = (next_earn - _past[-1]).days if (next_earn is not None and _past) else None
+    earn_date_ok = _gap is None or (55 <= _gap <= 125)
 
     term_ratio = front_iv / back_iv
     iv_rv = front_iv / rv20 if rv20 else float("nan")
@@ -495,16 +530,20 @@ def _analyze_impl(symbol: str, live: bool = False) -> dict:
 
     if not math.isnan(move_ratio):
         if move_ratio > 1.20:
-            rich += 2; reasons.append(f"Implied move ±{earn_move:.1f}% is {move_ratio:.2f}× history (±{hist_avg:.1f}%) — market over-paying.")
+            mv_delta, msg = 2, f"Implied move ±{earn_move:.1f}% is {move_ratio:.2f}× history (±{hist_avg:.1f}%) — market over-paying."
         elif move_ratio > 1.05:
-            rich += 1; reasons.append(f"Implied move ±{earn_move:.1f}% is {move_ratio:.2f}× history (±{hist_avg:.1f}%) — modestly rich.")
+            mv_delta, msg = 1, f"Implied move ±{earn_move:.1f}% is {move_ratio:.2f}× history (±{hist_avg:.1f}%) — modestly rich."
         elif move_ratio < 0.75:
-            rich -= 2; reasons.append(f"Implied move ±{earn_move:.1f}% is only {move_ratio:.2f}× history (±{hist_avg:.1f}%) — market badly under-pricing the move.")
+            mv_delta, msg = -2, f"Implied move ±{earn_move:.1f}% is only {move_ratio:.2f}× history (±{hist_avg:.1f}%) — market badly under-pricing the move."
         elif move_ratio < 0.90:
-            rich -= 1; move_risk = True
-            reasons.append(f"Implied move ±{earn_move:.1f}% is {move_ratio:.2f}× history (±{hist_avg:.1f}%) — under-priced; if selling, only wide far-OTM defined-risk.")
+            mv_delta, msg, move_risk = -1, f"Implied move ±{earn_move:.1f}% is {move_ratio:.2f}× history (±{hist_avg:.1f}%) — under-priced; if selling, only wide far-OTM defined-risk.", True
         else:
-            reasons.append(f"Implied move ≈ historical ({move_ratio:.2f}×) — fairly priced.")
+            mv_delta, msg = 0, f"Implied move ≈ historical ({move_ratio:.2f}×) — fairly priced."
+        if hist_thin and abs(mv_delta) > 1:
+            mv_delta = 1 if mv_delta > 0 else -1
+            msg += f"  (only {hist_n} prior print{'s' if hist_n != 1 else ''} — score capped, treat as speculative)"
+        rich += mv_delta
+        reasons.append(msg)
     elif earn_move is None:
         reasons.append("Front expiry carries no event premium yet — earnings too far out to read.")
 
@@ -549,6 +588,11 @@ def _analyze_impl(symbol: str, live: bool = False) -> dict:
     tail_risk = (hist_max is not None and earn_move is not None
                  and hist_max > 2.2 * earn_move)
 
+    # 3. Macro-regime gate (P2): short-vol entries fare worse in a high-VIX /
+    #    risk-off tape — raise the bar to sell premium (mirrors alerts_live_runner).
+    regime_label, regime_note = _market_regime()
+    sell_bar = 3.0 if regime_label in ("HIGH-VOL", "RISK-OFF") else 2.0
+
     if too_far:
         if next_earn is None:
             verdict = "WAIT — no confirmed earnings date"
@@ -564,7 +608,11 @@ def _analyze_impl(symbol: str, live: bool = False) -> dict:
         verdict = "STAND ASIDE — implied move too small vs this name's worst prints"
         reasons.append(f"→ Worst historical earnings move ±{hist_max:.0f}% is >2.2× the implied "
                        f"±{earn_move:.1f}% — a defined-risk condor can't span that. Skip.")
-    elif rich >= 2:  # implied move is genuinely rich (move_ok) and no tail_risk
+    elif rich >= 2 and not earn_date_ok:
+        verdict = "STAND ASIDE — earnings date looks unreliable"
+        reasons.append(f"→ Next earnings date is {_gap}d after the last one — implausible spacing, "
+                       f"likely a stale/duplicate data row. Verify the date with the company before trading.")
+    elif rich >= sell_bar:  # implied move is genuinely rich (move_ok) and no tail_risk
         strength = "strong edge" if rich >= 3 else "moderate — size small"
         # shorts a touch further OTM when the implied move is only modestly rich
         sd = 0.16 if move_ratio >= 1.15 else 0.12
@@ -580,6 +628,10 @@ def _analyze_impl(symbol: str, live: bool = False) -> dict:
             verdict = f"SELL PREMIUM ({strength}) — neutral"
             strat = _iron_condor(fc, fp, spot, ivc, ivp, T_front, short_delta=sd)
             reasons.append(f"→ Iron Condor ({sd*100:.0f}Δ shorts): no directional read, harvest the crush both sides.")
+    elif rich >= 2:  # edge is there but regime gate held it back
+        verdict = f"STAND ASIDE — score {rich:.0f} but {regime_label} regime (need ≥{sell_bar:.0f} to sell vol)"
+        reasons.append(f"→ {regime_note or regime_label}. Short-vol entries are gated higher in this "
+                       f"tape — see EARNINGS_IV_FILTER_RESEARCH.md.")
     elif rich <= -2:
         if lean == "bullish":
             verdict = "BUY PREMIUM — under-priced, bullish"
@@ -612,8 +664,10 @@ def _analyze_impl(symbol: str, live: bool = False) -> dict:
         "front_exp": front_exp, "back_exp": back_exp,
         "front_iv": front_iv, "back_iv": back_iv, "term_ratio": term_ratio,
         "iv_rv": iv_rv, "straddle_pct": straddle_pct, "earn_move": earn_move,
-        "hist_avg": hist_avg, "hist_max": hist_max, "hmoves": hmoves,
+        "hist_avg": hist_avg, "hist_max": hist_max, "hmoves": hmoves, "hist_n": hist_n,
         "move_ratio": move_ratio, "ret10": ret10, "skew": skew, "lean": lean,
+        "earn_date_ok": earn_date_ok, "earn_gap_days": _gap,
+        "regime": regime_label, "regime_note": regime_note, "sell_bar": sell_bar,
         "score": score, "reasons": reasons, "verdict": verdict, "strat": strat,
     }
 
@@ -861,6 +915,175 @@ def _sizing(strat, account, risk_pct):
 
 
 # --------------------------------------------------------------------------- #
+# Position watch — logs fills you actually made and enforces a stop-loss on
+# demand (breach of a short strike, spread value doubling, or 21-DTE) instead
+# of leaving "when to cut" as advice you have to remember yourself.
+# --------------------------------------------------------------------------- #
+_POS_PATH = os.path.join(os.path.dirname(__file__), "Data", "earnings_iv", "positions.json")
+
+
+def _load_positions() -> list[dict]:
+    import json
+    if not os.path.exists(_POS_PATH):
+        return []
+    try:
+        with open(_POS_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _save_positions(positions: list[dict]):
+    import json
+    os.makedirs(os.path.dirname(_POS_PATH), exist_ok=True)
+    with open(_POS_PATH, "w") as f:
+        json.dump(positions, f, indent=2)
+
+
+def _check_position(pos: dict) -> dict:
+    """Live stop-loss read for one logged position. Never raises — a data
+    hiccup must show as an error state, not crash the page."""
+    try:
+        symbol, expiry = pos["symbol"], pos["expiry"]
+        legs = pos["legs"]
+        entry_net = float(pos["entry_net"])          # >0 credit received, <0 debit paid
+        kind = "credit" if entry_net > 0 else "debit"
+
+        spot = _fresh_spot(symbol)
+        if not spot:
+            return {"error": "couldn't get a live quote (feed down / market closed?)"}
+
+        calls, puts = _chain_impl(symbol, expiry)
+        if calls is None:
+            return {"error": "couldn't load the option chain for this expiry"}
+        iv, _ = _atm_iv(calls, puts, spot)
+        iv = iv or 0.35  # fallback so a stale-IV feed doesn't block a price read
+        T = max((pd.Timestamp(expiry) - pd.Timestamp.now()).days, 0) / 365.0
+
+        cur = 0.0
+        leg_reads = []
+        for l in legs:
+            df = calls if l["right"] == "C" else puts
+            px, src, liquid, info = _quote(df, float(l["strike"]), spot, iv, T, l["right"] == "C")
+            sign = -1 if l["action"] == "SELL" else 1     # cost to CLOSE: buy back shorts, sell longs
+            cur += sign * px
+            leg_reads.append({**l, "px": round(px, 2), "src": src})
+        # cur = net debit to close (credit trade) or current value (debit trade)
+
+        sells = sorted(float(l["strike"]) for l in legs if l["action"] == "SELL")
+        buys = sorted(float(l["strike"]) for l in legs if l["action"] == "BUY")
+        entry_abs = abs(entry_net)
+
+        triggers = []
+        if kind == "credit":
+            pnl = entry_abs - cur                        # credit collected − cost to close now
+            if cur >= 2 * entry_abs:
+                triggers.append(f"spread value ${cur:.2f} ≥ 2× your ${entry_abs:.2f} credit")
+            for s in sells:
+                is_put = any(l["right"] == "P" and float(l["strike"]) == s for l in legs)
+                if (is_put and spot < s) or (not is_put and spot > s):
+                    triggers.append(f"spot ${spot:.2f} has breached your short strike ${s:g}")
+            if pnl >= 0.5 * entry_abs:
+                status = "TAKE PROFIT"
+            elif triggers:
+                status = "CUT — stop hit"
+            else:
+                status = "HOLD"
+        else:
+            pnl = cur - entry_abs                         # current value − debit paid
+            if cur <= 0.5 * entry_abs:
+                triggers.append(f"value ${cur:.2f} has decayed to ≤50% of your ${entry_abs:.2f} debit")
+            status = "CUT — stop hit" if triggers else ("TAKE PROFIT" if pnl >= 0.5 * entry_abs else "HOLD")
+
+        try:
+            dte = (pd.Timestamp(expiry) - pd.Timestamp.now()).days
+            d21 = pd.Timestamp(expiry) - pd.Timedelta(days=21)
+            if pd.Timestamp.now().normalize() >= d21.normalize() and status == "HOLD":
+                status = "CUT — 21 DTE time stop"
+                triggers.append(f"{dte}d to expiry — inside the 21-DTE management window")
+        except Exception:
+            pass
+
+        return {"spot": spot, "cur": round(cur, 2), "entry_abs": round(entry_abs, 2),
+                "pnl": round(pnl * 100, 0), "status": status, "triggers": triggers,
+                "legs": leg_reads, "kind": kind}
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)}
+
+
+def _render_position_watch():
+    st.markdown("Log a fill you actually made once; come back and hit **Check now** any time — "
+                "it pulls a live quote and tells you HOLD / TAKE PROFIT / CUT against the same "
+                "rules the 📐 Plan gives you up front, so you don't have to remember or eyeball it.")
+    positions = _load_positions()
+
+    with st.expander("➕ Log a new position", expanded=not positions):
+        c1, c2, c3 = st.columns(3)
+        symbol = c1.text_input("Ticker", key="pw_sym").strip().upper()
+        expiry = c2.date_input("Expiry", key="pw_exp")
+        entry_net = c3.number_input("Entry net ($/share) — +credit received, -debit paid",
+                                     value=0.0, step=0.01, format="%.2f", key="pw_net")
+        st.caption("Legs — one row per leg (as shown on your fill confirmation).")
+        default_legs = pd.DataFrame(
+            [{"action": "SELL", "strike": 0.0, "right": "P"},
+             {"action": "BUY", "strike": 0.0, "right": "P"}])
+        legs_df = st.data_editor(
+            default_legs, num_rows="dynamic", key="pw_legs", use_container_width=True,
+            column_config={
+                "action": st.column_config.SelectboxColumn(options=["SELL", "BUY"]),
+                "right": st.column_config.SelectboxColumn(options=["C", "P"]),
+                "strike": st.column_config.NumberColumn(format="%.2f"),
+            })
+        if st.button("Save position", type="primary"):
+            legs = [l for l in legs_df.to_dict("records") if l.get("strike")]
+            if not symbol or not legs or entry_net == 0:
+                st.error("Need a ticker, at least one leg with a strike, and a non-zero entry net.")
+            else:
+                positions.append({
+                    "id": f"{symbol}_{expiry}_{int(time.time())}",
+                    "symbol": symbol, "expiry": str(expiry), "entry_net": entry_net,
+                    "legs": legs, "logged_at": pd.Timestamp.now(tz="UTC").isoformat(),
+                })
+                _save_positions(positions)
+                st.success(f"Logged {symbol} {expiry}."); st.rerun()
+
+    if not positions:
+        st.info("No positions logged yet.")
+        return
+
+    st.divider()
+    for pos in list(positions):
+        legdesc = ", ".join(f"{l['action']} {l['strike']:g}{l['right']}" for l in pos["legs"])
+        with st.container(border=True):
+            top = st.columns([3, 1, 1])
+            top[0].markdown(f"**{pos['symbol']}** exp `{pos['expiry']}` — {legdesc}  \n"
+                             f"Entry net: {'credit' if float(pos['entry_net'])>0 else 'debit'} "
+                             f"${abs(float(pos['entry_net'])):.2f}")
+            check = top[1].button("🔄 Check now", key=f"chk_{pos['id']}")
+            if top[2].button("🗑 Remove", key=f"rm_{pos['id']}"):
+                _save_positions([p for p in positions if p["id"] != pos["id"]])
+                st.rerun()
+
+            if check:
+                st.session_state[f"res_{pos['id']}"] = _check_position(pos)
+            res = st.session_state.get(f"res_{pos['id']}")
+            if res:
+                if res.get("error"):
+                    st.warning(f"Couldn't check live: {res['error']}")
+                else:
+                    color = {"HOLD": st.info, "TAKE PROFIT": st.success,
+                             "CUT — stop hit": st.error, "CUT — 21 DTE time stop": st.error}
+                    cols = st.columns(3)
+                    cols[0].metric("Spot now", f"${res['spot']:.2f}")
+                    cols[1].metric("Value to close", f"${res['cur']:.2f}",
+                                   help=f"entry was ${res['entry_abs']:.2f}")
+                    cols[2].metric("P/L (1 lot)", f"${res['pnl']:+.0f}")
+                    color.get(res["status"], st.info)(f"**{res['status']}**")
+                    for t in res["triggers"]:
+                        st.caption("⚠ " + t)
+
+
+# --------------------------------------------------------------------------- #
 # Render — dispatcher
 # --------------------------------------------------------------------------- #
 def render_earnings_iv():
@@ -877,16 +1100,33 @@ def render_earnings_iv():
         "</div>",
         unsafe_allow_html=True,
     )
-    mode = st.radio("mode", ["🔍 Earnings — single ticker", "📡 Earnings — scan",
-                             "💵 Premium — no earnings"],
+    bc1, bc2 = st.columns([3, 1.2])
+    mode = bc1.radio("mode", ["🔍 Earnings — single ticker", "📡 Earnings — scan",
+                             "💵 Premium — no earnings", "🚨 Stop-Loss Monitor"],
                     horizontal=True, label_visibility="collapsed")
+    bias = bc2.selectbox(
+        "Market bias", ["Neutral", "Bearish", "Bullish"], key="mkt_bias",
+        help="Short premium profits from time passing / range, not from being right on "
+             "direction. 'Bearish' here means slow-grind-down-or-choppy, NOT an expected "
+             "crash — biases the scan/premium tabs toward bear-call & condor structures "
+             "and away from bull puts. For a real drawdown view, this tool is the wrong "
+             "instrument (you'd want long puts); use it as a 'harvest premium while I "
+             "wait' sleeve, sized small.").lower()
+    if bias != "neutral":
+        st.caption(f"📐 **{bias.capitalize()} bias** — Earnings-scan pre-filters to "
+                   f"{'bear-call / neutral' if bias == 'bearish' else 'bull-put / neutral'} "
+                   f"signals; Premium tab pre-selects "
+                   f"{'down + side' if bias == 'bearish' else 'up + side'} trend. "
+                   f"Change anytime — this only sets the default filters below.")
     st.divider()
     if mode.startswith("🔍"):
         _render_single()
     elif mode.startswith("📡"):
-        _render_scanner()
+        _render_scanner(bias)
+    elif mode.startswith("💵"):
+        _render_premium(bias)
     else:
-        _render_premium()
+        _render_position_watch()
 
 
 # --------------------------------------------------------------------------- #
@@ -913,6 +1153,12 @@ def _render_single():
     m[0].metric("Spot", f"${r['spot']:,.2f}")
     m[1].metric("Next earnings", r["next_earn"].strftime("%Y-%m-%d") if r["next_earn"] is not None else "unknown")
     m[2].metric("Days to earnings", r["dte_earn"] if r["dte_earn"] is not None else "—")
+    if not r.get("earn_date_ok", True):
+        st.warning(f"⚠ That earnings date is {r.get('earn_gap_days')}d after the previous one — "
+                   f"implausible spacing, likely a stale data row. Verify with the company's IR page.")
+    if r.get("regime") in ("HIGH-VOL", "RISK-OFF"):
+        st.caption(f"Regime: **{r['regime']}** ({r.get('regime_note','')}) — SELL bar raised to "
+                   f"score ≥ {r.get('sell_bar', 3):.0f}.")
 
     st.subheader("Volatility read")
     v = st.columns(4)
@@ -998,8 +1244,10 @@ def scan_row(rep: dict, r: dict) -> dict:
         "Term ratio": _num(r.get("term_ratio"), 2),
         "Impl move %": _num(r.get("earn_move"), 1),
         "Hist avg %": _num(r.get("hist_avg"), 1),
+        "Hist n": r.get("hist_n") or 0,
         "Impl/Hist": _num(r.get("move_ratio"), 2),
         "Score": _num(r.get("score"), 1) or 0,
+        "Date?": ("✓" if r.get("earn_date_ok", True) else "⚠ check"),
         "Signal": f"{_VERDICT_ICON.get(vkey, '')} {r['verdict']}",
         "Structure": strat["name"].split(" — ")[0] if strat else "—",
         "Credit/Debit": (f"{strat['net_kind'][0].upper()} ${strat['net']:.2f}" if strat else "—"),
@@ -1010,7 +1258,7 @@ def scan_row(rep: dict, r: dict) -> dict:
 # --------------------------------------------------------------------------- #
 # Render — scanner (reads the nightly cache; can refresh on demand)
 # --------------------------------------------------------------------------- #
-def _render_scanner():
+def _render_scanner(bias: str = "neutral"):
     dark = st.session_state.get("dark_mode", False)
     from earnings_prefetch import build_scan, DEFAULT_UNIVERSE, DEFAULT_DAYS
     from earnings_cache import UNIVERSES
@@ -1067,8 +1315,17 @@ def _render_scanner():
                     "suggested structure.")
         return
 
+    # ── macro-regime banner (P2) ───────────────────────────────────────────
+    _reg_label, _reg_note = _market_regime()
+    if _reg_label in ("HIGH-VOL", "RISK-OFF"):
+        st.warning(f"**{_reg_label} regime** — {_reg_note or 'high VIX / weak SPY'}. "
+                   f"Short-vol (SELL) entries need score **≥ 3** here instead of ≥ 2; "
+                   f"names that clear the edge but not this bar show as *STAND ASIDE — regime*.")
+    elif _reg_note:
+        st.caption(f"Regime: {_reg_label} · {_reg_note} — SELL bar at the normal ≥ 2.")
+
     # ── filters over the cached superset ────────────────────────────────────
-    f1, f2, f3, f4 = st.columns([1, 1, 1, 1])
+    f1, f2, f3, f4, f5 = st.columns([1, 1, 1, 1, 1])
     _dte_num = pd.to_numeric(df["DTE"], errors="coerce")
     _mx = _dte_num.max()
     max_dte = int(_mx) if pd.notna(_mx) and _mx >= 2 else max(DEFAULT_DAYS, 2)
@@ -1078,20 +1335,36 @@ def _render_scanner():
                           help="Richness score: >0 sell premium, <0 buy premium. "
                                "Set to −4 to see BUY-side (long strangle / debit) ideas too.")
     risk_pct = f4.slider("Risk / trade %", 0.5, 5.0, 1.5, 0.5, key="scan_risk")
+    hide_bad_date = f5.checkbox("Hide unreliable dates", value=True,
+                               help="Drops rows whose next earnings date sits an implausible "
+                                    "distance from the last one — usually a stale yfinance row.")
 
-    def _filtered(d, days_, min_score_, only_act_):
+    apply_bias = False
+    if bias != "neutral":
+        apply_bias = st.checkbox(
+            f"Apply {bias} bias — drop {'bullish' if bias == 'bearish' else 'bearish'}-tilt "
+            f"signals (keep {'bear-call / neutral' if bias == 'bearish' else 'bull-put / neutral'})",
+            value=True, key="scan_bias_filter")
+
+    def _filtered(d, days_, min_score_, only_act_, hide_bad_date_=True, bias_=None):
         v = d.copy()
         v["DTE_n"] = pd.to_numeric(v["DTE"], errors="coerce")
         v = v[v["DTE_n"].fillna(999) <= days_]
         v["_act"] = v["Signal"].str.contains("SELL|BUY")
         v["_conv"] = v["Score"].abs()
         v = v[v["Score"] >= min_score_]
+        if hide_bad_date_ and "Date?" in v.columns:
+            v = v[~v["Date?"].astype(str).str.contains("check")]
+        if bias_ == "bearish":
+            v = v[~v["Signal"].str.contains("bullish tilt")]
+        elif bias_ == "bullish":
+            v = v[~v["Signal"].str.contains("bearish tilt")]
         if only_act_:
             v = v[v["_act"]]
         return (v.sort_values(["_act", "_conv"], ascending=[False, False])
                  .drop(columns=["_act", "_conv", "DTE_n"]))
 
-    view = _filtered(df, days, min_score, only_act)
+    view = _filtered(df, days, min_score, only_act, hide_bad_date, bias if apply_bias else None)
 
     n_sell = int(df["Signal"].str.contains("SELL").sum())
     n_buy = int(df["Signal"].str.contains("BUY").sum())
@@ -1101,7 +1374,7 @@ def _render_scanner():
     if view.empty:
         # auto-relax: widest window, all scores, include STAND ASIDE/WAIT rows too —
         # never leave the page blank when the cache actually has data.
-        fallback = _filtered(df, max_dte, -4.0, False)
+        fallback = _filtered(df, max_dte, -4.0, False, hide_bad_date)
         if not fallback.empty:
             view, relaxed = fallback, "widened the window and dropped the SELL/BUY-only filter"
 
@@ -1112,6 +1385,15 @@ def _render_scanner():
     if relaxed:
         st.warning(f"Nothing cleared your filters, so I {relaxed} to show what's actually in the "
                    f"cache instead of a blank page. Tighten the filters above once there's more to pick from.")
+    elif only_act:
+        # name the near-misses the SELL/BUY filter is hiding (the ORCL case)
+        near = df[(~df["Signal"].str.contains("SELL|BUY")) & (df["Score"].abs() >= 1)]
+        near = near[pd.to_numeric(near["DTE"], errors="coerce").fillna(999) <= days]
+        if not near.empty:
+            _lst = ", ".join(f"{t} ({s:+.0f})" for t, s in
+                             zip(near["Ticker"], near["Score"]))
+            st.caption(f"👀 {len(near)} name(s) scored close to the action bar but are STAND ASIDE / WAIT "
+                       f"— untick *Only SELL / BUY* to inspect: {_lst}")
     if view.empty:
         st.info("The cache itself is empty for this window — not a filter problem. Click **Refresh** "
                 "or widen the day range.")
@@ -1124,9 +1406,11 @@ def _render_scanner():
     # ── trade tickets from cached detail (cap to keep the page light) ──────
     st.divider()
     _tix = view["Ticker"].tolist()
-    _TICKET_CAP = 15
+    _TICKET_CAP = st.slider("Trade tickets to show", 5, max(len(_tix), 5),
+                            min(len(_tix), 40), 5, key="scan_ticket_cap",
+                            help="Every filtered name can have a ticket — raise this to see them all.")
     st.subheader(f"Trade tickets"
-                 + (f" — top {_TICKET_CAP} of {len(_tix)} (filter to see others)"
+                 + (f" — showing {min(_TICKET_CAP, len(_tix))} of {len(_tix)}"
                     if len(_tix) > _TICKET_CAP else ""))
     for sym in _tix[:_TICKET_CAP]:
         r = details.get(sym)
@@ -1384,7 +1668,7 @@ def premium_row(r: dict) -> dict:
     }
 
 
-def _render_premium():
+def _render_premium(bias: str = "neutral"):
     dark = st.session_state.get("dark_mode", False)
     from earnings_prefetch import build_premium_scan
 
@@ -1431,31 +1715,47 @@ def _render_premium():
                     "earnings in the trade window, ranked best-first.")
         return
 
-    f1, f2, f3, f4 = st.columns(4)
+    _tr = df["Trend"].astype(str) if "Trend" in df.columns else pd.Series([], dtype=str)
+    _n_up, _n_side, _n_down = (_tr == "up").sum(), (_tr == "side").sum(), (_tr == "down").sum()
+
+    f1, f2, f3, f4, f5 = st.columns(5)
     good_only = f1.checkbox("Only GOOD-rated", value=False)
     min_pop = f2.slider("Min PoP %", 50, 90, 60)
     min_ann = f3.slider("Min ann. RoR %", 0, 150, 0, 10)
     risk_pct = f4.slider("Risk / trade %", 0.5, 5.0, 1.5, 0.5, key="prem_risk")
+    _trend_default = (["down", "side"] if bias == "bearish"
+                      else ["up", "side"] if bias == "bullish"
+                      else ["up", "side", "down"])
+    trend_pick = f5.multiselect(
+        "Trend", ["up", "side", "down"], default=_trend_default,
+        help=f"Bull-put (up {_n_up}) · iron-condor (side {_n_side}) · bear-call (down {_n_down}). "
+             f"Down-trend names are almost always ⚪ marginal — bear-call spreads on low-IV "
+             f"large-caps collect too little premium to clear the RoR gate. Untick 'Only GOOD-rated' "
+             f"to see them."
+             + (f"  Pre-set to {_trend_default} for your {bias} bias." if bias != "neutral" else ""))
 
-    def _filtered(d, pop_, ann_, good_):
+    def _filtered(d, pop_, ann_, good_, trends_):
         v = d.copy()
         v = v[pd.to_numeric(v["PoP %"], errors="coerce").fillna(0) >= pop_]
         v = v[pd.to_numeric(v["Ann. RoR %"], errors="coerce").fillna(0) >= ann_]
         if good_:
             v = v[v["Verdict"].str.contains("GOOD")]
+        if trends_ and "Trend" in v.columns and len(trends_) < 3:
+            v = v[v["Trend"].astype(str).isin(trends_)]
         return v.sort_values("Quality", ascending=False)
 
-    view = _filtered(df, min_pop, min_ann, good_only)
+    view = _filtered(df, min_pop, min_ann, good_only, trend_pick)
     n_good = int(df["Verdict"].str.contains("GOOD").sum())
     n_skip = len(meta.get("skipped", [])) if meta else 0
 
     relaxed = None
     if view.empty:
-        fallback = _filtered(df, 0, 0, False).head(10)
+        fallback = _filtered(df, 0, 0, False, trend_pick).head(10)
         if not fallback.empty:
             view, relaxed = fallback, "dropped every filter and I'm showing the top 10 by quality anyway"
 
-    st.success(f"{n_good} GOOD in cache · {len(df)} ideas analysed"
+    st.success(f"{n_good} GOOD in cache · {len(df)} ideas analysed "
+              f"({_n_up} up / {_n_side} side / {_n_down} down)"
               + (f" · {n_skip} skipped (data outage — see below)" if n_skip else "")
               + f" · showing {len(view)}")
 
@@ -1474,9 +1774,11 @@ def _render_premium():
 
     st.divider()
     _tix = view["Ticker"].tolist()
-    _TICKET_CAP = 15
+    _TICKET_CAP = st.slider("Trade tickets to show", 5, max(len(_tix), 5),
+                            min(len(_tix), 40), 5, key="prem_ticket_cap",
+                            help="Every filtered name can have a ticket — raise this to see them all.")
     st.subheader("Trade tickets"
-                 + (f" — top {_TICKET_CAP} of {len(_tix)} (filter to see others)"
+                 + (f" — showing {min(_TICKET_CAP, len(_tix))} of {len(_tix)}"
                     if len(_tix) > _TICKET_CAP else ""))
     for sym in _tix[:_TICKET_CAP]:
         r = details.get(sym)
