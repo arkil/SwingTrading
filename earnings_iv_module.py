@@ -948,6 +948,23 @@ def _check_position(pos: dict) -> dict:
         legs = pos["legs"]
         entry_net = float(pos["entry_net"])          # >0 credit received, <0 debit paid
         kind = "credit" if entry_net > 0 else "debit"
+        earn_date = pos.get("earn_date")             # set only for earnings-play positions
+
+        # ── Earnings trades: the edge IS the crush at the print. Once it has
+        # happened, every extra day held is pure directional/gamma risk with
+        # no edge left — this overrides the breach/doubling/21-DTE checks
+        # below, which are the right rules for a PRE-earnings hold but wrong
+        # once the report is out. (This is what actually sank the ADBE trade:
+        # held to the 9/11 expiry instead of closing the day after the print.)
+        if earn_date:
+            days_since = (pd.Timestamp.now().normalize() - pd.Timestamp(earn_date).normalize()).days
+            if days_since >= 1:
+                spot0 = _fresh_spot(symbol) or 0.0
+                return {"spot": spot0, "cur": None, "entry_abs": abs(entry_net), "pnl": None,
+                        "status": "CUT — earnings passed",
+                        "triggers": [f"reported {days_since}d ago — IV crush already realized, "
+                                     f"no more edge in holding; close today regardless of P/L"],
+                        "legs": [], "kind": kind}
 
         spot = _fresh_spot(symbol)
         if not spot:
@@ -1023,6 +1040,13 @@ def _render_position_watch():
         expiry = c2.date_input("Expiry", key="pw_exp")
         entry_net = c3.number_input("Entry net ($/share) — +credit received, -debit paid",
                                      value=0.0, step=0.01, format="%.2f", key="pw_net")
+        is_earn = st.checkbox("This was an earnings play (IV-crush trade)", key="pw_is_earn",
+                              help="Changes the stop rule: instead of breach/2x-credit/21-DTE, "
+                                   "the trade gets cut the day after the print regardless of P/L "
+                                   "— there's no more edge in an earnings trade once IV has crushed.")
+        earn_date = None
+        if is_earn:
+            earn_date = st.date_input("Earnings date (the print)", key="pw_earn_date")
         st.caption("Legs — one row per leg (as shown on your fill confirmation).")
         default_legs = pd.DataFrame(
             [{"action": "SELL", "strike": 0.0, "right": "P"},
@@ -1043,6 +1067,7 @@ def _render_position_watch():
                     "id": f"{symbol}_{expiry}_{int(time.time())}",
                     "symbol": symbol, "expiry": str(expiry), "entry_net": entry_net,
                     "legs": legs, "logged_at": pd.Timestamp.now(tz="UTC").isoformat(),
+                    "earn_date": str(earn_date) if is_earn and earn_date else None,
                 })
                 _save_positions(positions)
                 st.success(f"Logged {symbol} {expiry}."); st.rerun()
@@ -1056,7 +1081,8 @@ def _render_position_watch():
         legdesc = ", ".join(f"{l['action']} {l['strike']:g}{l['right']}" for l in pos["legs"])
         with st.container(border=True):
             top = st.columns([3, 1, 1])
-            top[0].markdown(f"**{pos['symbol']}** exp `{pos['expiry']}` — {legdesc}  \n"
+            tag = f" · 🎯 earnings {pos['earn_date']}" if pos.get("earn_date") else ""
+            top[0].markdown(f"**{pos['symbol']}** exp `{pos['expiry']}` — {legdesc}{tag}  \n"
                              f"Entry net: {'credit' if float(pos['entry_net'])>0 else 'debit'} "
                              f"${abs(float(pos['entry_net'])):.2f}")
             check = top[1].button("🔄 Check now", key=f"chk_{pos['id']}")
@@ -1072,12 +1098,13 @@ def _render_position_watch():
                     st.warning(f"Couldn't check live: {res['error']}")
                 else:
                     color = {"HOLD": st.info, "TAKE PROFIT": st.success,
-                             "CUT — stop hit": st.error, "CUT — 21 DTE time stop": st.error}
+                             "CUT — stop hit": st.error, "CUT — 21 DTE time stop": st.error,
+                             "CUT — earnings passed": st.error}
                     cols = st.columns(3)
-                    cols[0].metric("Spot now", f"${res['spot']:.2f}")
-                    cols[1].metric("Value to close", f"${res['cur']:.2f}",
+                    cols[0].metric("Spot now", f"${res['spot']:.2f}" if _fin(res.get("spot")) else "—")
+                    cols[1].metric("Value to close", f"${res['cur']:.2f}" if _fin(res.get("cur")) else "—",
                                    help=f"entry was ${res['entry_abs']:.2f}")
-                    cols[2].metric("P/L (1 lot)", f"${res['pnl']:+.0f}")
+                    cols[2].metric("P/L (1 lot)", f"${res['pnl']:+.0f}" if _fin(res.get("pnl")) else "—")
                     color.get(res["status"], st.info)(f"**{res['status']}**")
                     for t in res["triggers"]:
                         st.caption("⚠ " + t)
