@@ -14,7 +14,15 @@ Position sizing: 1% portfolio risk per trade
 import sys
 import os
 sys.path.insert(0, os.path.dirname(__file__))
-sys.path.insert(0, os.path.expanduser("~/.claude/cbt-framework"))
+# Prefer the copy vendored into this repo (works on Streamlit Cloud); fall
+# back to the local CBT Framework install for local dev.
+for _CBT_DIR in (
+    os.path.join(os.path.dirname(__file__), "vendor", "cbt_framework"),
+    os.path.expanduser("~/.claude/cbt-framework"),
+):
+    if os.path.isdir(os.path.join(_CBT_DIR, "engine")):
+        sys.path.insert(0, _CBT_DIR)
+        break
 
 import pandas as pd
 import numpy as np

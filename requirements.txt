@@ -16,3 +16,4 @@ alpaca-py>=0.40
 ephem>=4.1
 beautifulsoup4>=4.11
 lxml>=5.0
+polygon-api-client>=1.0
