@@ -24,11 +24,18 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
 # ── Strategy path ──────────────────────────────────────────────────────────────
-_STRATEGY_DIR = os.path.normpath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "strategies", "swing_options_45_60d")
-)
-if _STRATEGY_DIR not in sys.path:
-    sys.path.insert(0, _STRATEGY_DIR)
+# Prefer the copy vendored into this repo (works on Streamlit Cloud); fall
+# back to the sibling checkout for local dev.
+for _STRATEGY_DIR in (
+    os.path.join(os.path.dirname(__file__), "vendor", "swing_options_45_60d"),
+    os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "strategies", "swing_options_45_60d")
+    ),
+):
+    if os.path.isdir(os.path.join(_STRATEGY_DIR, "src")):
+        if _STRATEGY_DIR not in sys.path:
+            sys.path.insert(0, _STRATEGY_DIR)
+        break
 
 from src.backtest_engine import BacktestEngine
 
