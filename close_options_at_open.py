@@ -49,6 +49,19 @@ def _load_env() -> None:
                     os.environ.setdefault(k.strip(), v.strip().strip("'\""))
 
 
+def _theta_wheel_managed() -> set:
+    """Short puts the Theta Wheel paper bot (theta_wheel_paper.py) holds open. It closes
+    in-the-money ones itself with limit orders on expiry afternoon and lets OTM ones
+    expire, so the 9:35 market-order sweep leaves them alone. Unreadable ledger -> empty
+    set, i.e. the sweep closes everything as before."""
+    import json
+    try:
+        with open(os.path.join(os.path.dirname(__file__), "Data", "theta_wheel", "paper_ledger.json")) as f:
+            return {r["occ"] for r in json.load(f) if r.get("status") == "open"}
+    except Exception:
+        return set()
+
+
 def main() -> None:
     _load_env()
     api_key = os.environ.get("ALPACA_API_KEY", "")
@@ -62,8 +75,12 @@ def main() -> None:
 
     positions = get_positions(client)
     to_close = []
+    exempt = _theta_wheel_managed()
     for p in positions:
         parsed = parse_option_symbol(p["symbol"])
+        if p["symbol"] in exempt and parsed and parsed["expiration"] == today:
+            log.info("  ⏭  SKIP    %-22s  (Theta Wheel short put — its bot manages expiry)", p["symbol"])
+            continue
         if parsed and parsed["expiration"] <= today:
             to_close.append((p["symbol"], parsed["expiration"]))
 

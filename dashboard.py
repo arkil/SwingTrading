@@ -8084,6 +8084,24 @@ def _home_tool_minervini(_key: str) -> pd.DataFrame:
     ])
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def _home_tool_theta_wheel(_key: str) -> pd.DataFrame:
+    """This week's put-sell signals from the Theta Wheel cache (no live yfinance hit)."""
+    from theta_wheel_module import load_latest
+    df, _details, _meta = load_latest()
+    if df is None or df.empty:
+        return pd.DataFrame()
+    df = df[df["Action"].str.startswith("SELL")]
+    return pd.DataFrame([{
+        "Ticker": r["Ticker"], "Action": r["Action"].replace("SELL PUT — ", "SELL PUT · "),
+        "Regime": r["Regime"], "Bull★": r["Bull★"], "Fund": r["Fund"],
+        "Put": f"{r['Expiry']} {r['Put K']:g}P" if pd.notna(r.get("Put K")) else "—",
+        "Mid": _home_price(r.get("Put mid")),
+        "Yield/wk": f"{r['Yield %/wk']:.2f}%" if pd.notna(r.get("Yield %/wk")) else "—",
+        "Δ": r.get("Δ"), "Tier": f"{r['Tier']}%",
+    } for _, r in df.iterrows()]).fillna("")
+
+
 _HOME_TOOL_SPOTLIGHT = [
     ("🔔 Daily Alerts",    _home_tool_alerts,    "alerts"),
     ("🔴 Livermore",       _home_tool_livermore, "livermore"),
@@ -8092,6 +8110,7 @@ _HOME_TOOL_SPOTLIGHT = [
     ("〰️ RSI",             _home_tool_rsi,       "rsi"),
     ("〽️ MACD",            _home_tool_macd,      "macd"),
     ("📐 Minervini SEPA",  _home_tool_minervini, "minervini"),
+    ("🎡 Theta Wheel",     _home_tool_theta_wheel, "theta_wheel"),
 ]
 
 
@@ -11727,6 +11746,11 @@ def render_tqqq_sqqq():
     _render()
 
 
+def render_theta_wheel():
+    from theta_wheel_module import render_theta_wheel as _render
+    _render()
+
+
 def render_ravish_theta():
     from ravish_theta_module import render_ravish_theta as _render
     _render()
@@ -11751,6 +11775,7 @@ SCANNERS = [
     {"id": "volume",         "label": "🔊  Volume Surge",        "category": "technical", "render": render_volume},
     {"id": "options_hub",    "label": "⚡  Options Scanner",     "category": "options",   "render": render_options_hub},
     {"id": "earnings_iv",    "label": "💥  Earnings IV-Crush",   "category": "options",   "render": render_earnings_iv},
+    {"id": "theta_wheel",    "label": "🎡  Theta Wheel (CSPs)",  "category": "options",   "render": render_theta_wheel},
     {"id": "ravish_theta",   "label": "⏳  Ravish Theta Machine", "category": "options",  "render": render_ravish_theta},
     {"id": "opt_paper",      "label": "🟢  Options Paper Trade", "category": "options",   "render": render_options_paper_trade},
     {"id": "opt_log",        "label": "📋  Options Trade Log",   "category": "options",   "render": render_options_log},

@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Theta Wheel PAPER forward test (theta_wheel_paper.py). NOT installed by default:
+     it places orders on the Alpaca paper account unattended. To enable:
+       cp disabled_launch_agents/com.swingtrading.theta-paper.plist ~/Library/LaunchAgents/
+       ./manage_services.sh start theta-paper
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.swingtrading.theta-paper</string>
+
+    <!-- open: Mon/Tue 10:20 ET (after the 10:05 theta-wheel scan). manage: every weekday
+         15:40, plus 15:50 as a second chance on expiry day. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>cd /Users/arkilthakkar/workplace/Scripts/SwingTrading &amp;&amp; if [ "$(date +%H)" -lt 12 ]; then .venv/bin/python theta_wheel_paper.py open; else .venv/bin/python theta_wheel_paper.py manage; fi</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/arkilthakkar/workplace/Scripts/SwingTrading</string>
+
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>10</integer><key>Minute</key><integer>20</integer></dict>
+        <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>10</integer><key>Minute</key><integer>20</integer></dict>
+        <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>15</integer><key>Minute</key><integer>40</integer></dict>
+        <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>15</integer><key>Minute</key><integer>40</integer></dict>
+        <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>15</integer><key>Minute</key><integer>40</integer></dict>
+        <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>15</integer><key>Minute</key><integer>40</integer></dict>
+        <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>15</integer><key>Minute</key><integer>40</integer></dict>
+        <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>15</integer><key>Minute</key><integer>50</integer></dict>
+    </array>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/arkilthakkar/workplace/Scripts/SwingTrading/logs/theta_paper.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/arkilthakkar/workplace/Scripts/SwingTrading/logs/theta_paper.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/arkilthakkar</string>
+        <key>TZ</key>
+        <string>America/New_York</string>
+    </dict>
+</dict>
+</plist>

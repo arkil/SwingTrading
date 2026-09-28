@@ -18,6 +18,8 @@ AGENTS=(
   "com.swingtrading.v6-options:v6:/Users/arkilthakkar/workplace/strategies/swing_options_45_60d/logs/v6_daemon.log"
   "com.swingtrading.expiry-sweep:expiry-sweep:logs/expiry_sweep.log"
   "com.swingtrading.earnings-iv:earnings-iv:logs/earnings_iv_prefetch.log"
+  "com.swingtrading.theta-wheel:theta-wheel:logs/theta_wheel.log"
+  "com.swingtrading.theta-paper:theta-paper:logs/theta_paper.log"
 )
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
