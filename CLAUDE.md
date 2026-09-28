@@ -51,6 +51,7 @@ real data and found to have no edge.
 | `?scanner=weekly_puts` | Weekly Puts 0-3 DTE (now a sub-tab of Options Scanner) |
 | `?scanner=zero_dte` | 0DTE Scanner (now a sub-tab of Options Scanner) |
 | `?scanner=swing_opts` | Swing Options 45–60 DTE |
+| `?scanner=ravish_theta` | Ravish Theta Machine — overnight earnings iron fly, theta-machine calendar, post-earnings iron condor (`ravish_theta_module.py`; logic, live scan + real-Alpaca-print backtester in `~/workplace/strategies/ravish_theta/`, scan cache `Data/scan_latest.json` there) |
 | `?scanner=gap` | Gap Scanner |
 | `?scanner=breakout` | Breakout Screener |
 | `?scanner=qullamaggie` | Qullamaggie Breakout + Episodic Pivot Screener |

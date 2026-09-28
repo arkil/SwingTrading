@@ -11727,6 +11727,11 @@ def render_tqqq_sqqq():
     _render()
 
 
+def render_ravish_theta():
+    from ravish_theta_module import render_ravish_theta as _render
+    _render()
+
+
 SCANNERS = [
     {"id": "home",         "label": "🏠  Home",               "category": "home",    "render": render_home},
     {"id": "stock_analyzer", "label": "🔍  Stock Analyzer",     "category": "analyze",   "render": render_stock_analyzer},
@@ -11746,6 +11751,7 @@ SCANNERS = [
     {"id": "volume",         "label": "🔊  Volume Surge",        "category": "technical", "render": render_volume},
     {"id": "options_hub",    "label": "⚡  Options Scanner",     "category": "options",   "render": render_options_hub},
     {"id": "earnings_iv",    "label": "💥  Earnings IV-Crush",   "category": "options",   "render": render_earnings_iv},
+    {"id": "ravish_theta",   "label": "⏳  Ravish Theta Machine", "category": "options",  "render": render_ravish_theta},
     {"id": "opt_paper",      "label": "🟢  Options Paper Trade", "category": "options",   "render": render_options_paper_trade},
     {"id": "opt_log",        "label": "📋  Options Trade Log",   "category": "options",   "render": render_options_log},
     {"id": "opt_backtest",   "label": "🔬  Options Backtest",    "category": "options",   "render": render_options_backtest},
