@@ -47,10 +47,11 @@ _VIEWS = {"All": None, "Neutral (ATM)": "Neutral", "Bullish (call +EM)": "Bullis
           "Bearish (put −EM)": "Bearish", "Double": "Double"}
 
 _COLS = ["tier", "symbol", "variant", "legs", "dte_front", "debit_mid", "debit_natural", "max_loss",
-         "max_profit_est", "reward_risk", "peak_at", "breakeven", "scale_out_at", "close_by", "fails"]
+         "max_profit_est", "reward_risk", "peak_at", "pnl_at_spot", "breakeven", "scale_out_at", "close_by", "fails"]
 _LABELS = {"dte_front": "DTE", "debit_mid": "debit $ (mid)", "debit_natural": "debit $ (natural)",
            "max_loss": "max loss $", "max_profit_est": "max profit $ (model)", "reward_risk": "reward : risk",
-           "peak_at": "peak at", "breakeven": "profit range (model)", "scale_out_at": "scale out at $ value",
+           "peak_at": "peak at", "pnl_at_spot": "P&L $ if price unchanged (model)",
+           "breakeven": "profit zones (model)", "scale_out_at": "scale out at $ value",
            "close_by": "close by"}
 
 
@@ -64,7 +65,8 @@ def _iv_board(df: pd.DataFrame):
     g = df.groupby("symbol", sort=False).first().reset_index()
     g["IV gate"] = ["✅ low" if (a is not None and b is not None and a < b) else "❌ high"
                     for a, b in zip(g["iv_now"], g["iv_median_1y"])]
-    g["earnings before back"] = [("—" if e in ("—", "none") else f"⚠️ {e}") for e in g["earnings"]]
+    g["earnings before back"] = [("—" if e in ("—", "none") else "⚠️ date unknown" if e == "unknown" else f"⚠️ {e}")
+                                 for e in g["earnings"]]
     g["passing setups"] = [int(((df.symbol == s) & (df.tier == "PASS")).sum()) for s in g["symbol"]]
     g = g.sort_values("iv_pctile_1y")
     st.dataframe(
@@ -131,7 +133,7 @@ def render_calendar_em():
     n_pass = int((df.tier == "PASS").sum())
     st.caption(f"**{n_pass} PASS** · {len(df) - n_pass} WATCH across {df.symbol.nunique()} symbols · "
                "ranked by IV percentile (lowest first). *Model* columns = value at the short expiry with "
-               "the long leg at today's IV, like the broker's P&L curve — not a forecast.")
+               "the long leg at today's IV, like the broker's P&L curve — not a forecast. A double calendar has two profit zones with a losing dip between them.")
     if sub.empty:
         st.info("Nothing passes right now in this view — switch off **PASS only** to see the WATCH setups "
                 "and which rule each one fails.")
