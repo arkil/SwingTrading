@@ -51,11 +51,20 @@ real data and found to have no edge.
 | `?scanner=weekly_puts` | Weekly Puts 0-3 DTE (now a sub-tab of Options Scanner) |
 | `?scanner=zero_dte` | 0DTE Scanner (now a sub-tab of Options Scanner) |
 | `?scanner=swing_opts` | Swing Options 45–60 DTE |
-| `?scanner=theta_wheel` | Theta Wheel — weekly cash-secured puts on bullish-weekly, fundamentally strong names (`theta_wheel_module.py`, cache `Data/theta_wheel/latest.json`) |
-| `?scanner=ravish_theta` | Ravish Theta Machine — overnight earnings iron fly, theta-machine calendar, post-earnings iron condor (`ravish_theta_module.py`; logic, live scan + real-Alpaca-print backtester in `~/workplace/strategies/ravish_theta/`, scan cache `Data/scan_latest.json` there) |
+| `?scanner=crash_hedge` | Crash Hedge — 2-month bearish put debit spread + VIX tail sleeve |
+| `?scanner=ravish_theta` | Ravish Theta Hub (`ravish_hub_module.py`) — one page, four views picked by a radio / `&view=`. Old `?scanner=theta_wheel` / `?scanner=spx_rsi_put` URLs redirect here with the matching view. |
+| `…&view=machine` | Ravish Theta Machine — overnight earnings iron fly, theta-machine calendar, post-earnings iron condor (`ravish_theta_module.py`; logic, live scan + real-Alpaca-print backtester in `~/workplace/strategies/ravish_theta/`, scan cache `Data/scan_latest.json` there) |
+| `…&view=calendar_em` | EM Calendar — Ravish's calendar-spread video (GuI-hH_jhlg): sell ~35 DTE, buy the same strike +7 d; neutral ATM call, bullish call at spot+EM, bearish put at spot−EM, double (both). PASS = ATM IV below its own 1-yr median (Alpaca option prints, cached `Data/cache/ativ_<sym>_35.parquet`), no earnings before the back expiry, 7±2 d gap, tight legs. Model max profit / profit range at the short expiry (`calendar_em_module.py`; scan `scan.py --only calendar_em` + `src/calendar_em.py` in `~/workplace/strategies/ravish_theta/`, universe in its `config.yaml` `calendar_em:`) |
+| `…&view=spx_put` | SPX RSI Bull Put — Ravish's RSI(14)<35 ATM 10-wide SPX put credit spread, 14 DTE, TP 50% (`spx_rsi_put_module.py`; SPX signal/chart from yfinance, SPY 1-wide live proxy from the ravish_theta scan; backtest `strategies/ravish_theta/src/rsi_put_spread.py`) |
+| `…&view=wheel` | Theta Wheel — weekly cash-secured puts on bullish-weekly, fundamentally strong names (`theta_wheel_module.py`, cache `Data/theta_wheel/latest.json`) |
+| `?scanner=daily_dashboard` | Daily Market Dashboard — copy of github.com/shthakkar/daily_dashboard: SPY 10/20 EMA direction, VIX level, SPY vs 52W high cards + Capitulation Fade, Qullamaggie MA tightness, Relative Strength, News Movers (`daily_dashboard_module.py`; screeners ported to `strategies/daily_dashboard/`, tests `tests/daily_dashboard/`; ~3-min Finviz+yfinance scan `python -m strategies.daily_dashboard.market` → `Data/daily_dashboard/latest.json`, auto-refreshed in the background when >12h old; needs `finvizfinance`) |
 | `?scanner=gap` | Gap Scanner |
 | `?scanner=breakout` | Breakout Screener |
 | `?scanner=qullamaggie` | Qullamaggie Breakout + Episodic Pivot Screener |
+| `?scanner=smallcap_momentum` | Small-Cap Momentum (Trader YC) — pre-market gapper watchlist with a WATCH/ARMED/TRIGGERED/SKIP status per name for the pre-market-high breakout (9:30–10:00), heat sizing from yesterday's doublers, rule replay with session charts |
+| `?scanner=vwap_bias` | VWAP Bias (Xavi Comas) — small-cap gappers get a long/short bias from VWAP; buy dips above it, short bounces below it, cut on a VWAP close or no bounce in 5 min (`vwap_bias_module.py`; rules `strategies/vwap_bias_xavi/rules.py`, shared with the backtest; reuses the Small-Cap Momentum gapper scan and bar cache). 2-yr SIP backtest: no edge after costs (`strategies/vwap_bias_xavi/research/REPORT.md`) |
+| `?scanner=parabolic_short` | Parabolic Short (Marius Stamatiou) — exhaustion-day short after a parabolic run: move vs market cap from the last 20-SMA base + huge expansion days, 2-day window, 1-min entries (first weakness / VWAP loss / VWAP kiss), stop HOD, target = his expected drop (`parabolic_short_module.py`; rules `strategies/parabolic_short_marius/rules.py`, shared with the backtest; full-market scan `python -m strategies.parabolic_short_marius.scan` after 17:00 ET → `Data/parabolic_short/latest.json`). Alerts only. 2-yr backtest: his intraday rules ≈ 0R; the daily filter alone shorted 09:35→close is positive both years (`strategies/parabolic_short_marius/research/REPORT.md`) |
+| `?scanner=lag7` | Lag-7 — at each month-end buy the Mag-7 name with the worst trailing 3M/6M return, hold 1 month (`lag7_module.py`, JSON cache `Data/lag7/latest.json` 20h TTL; research `~/workplace/strategies/lag7/`) |
 | `?scanner=combined` | Combined Strategy Scanner |
 | `?scanner=ibd` | IBD Buy Zone |
 | `?scanner=minervini` | Minervini SEPA |
@@ -73,6 +82,9 @@ real data and found to have no edge.
 ## Tool Map
 
 ### Screeners (run standalone or via dashboard)
+- `ta_common.py` — shared `ema`/`sma`/`rsi_ema`/`rsi_sma`/`atr` imported by the screeners below
+  (don't re-define them per file). Not named `indicators.py`: that collides with
+  `vendor/volume_scanner/indicators/` on the dashboard's `sys.path`.
 - `alerts_engine.py` — Daily alerts with entry/stop/target across all indicators
 - `breakout_screener.py` — Minervini SEPA, Darvas Box, NR7, Bollinger Squeeze, IBD, QuantifiedStrategies
 - `combined_screener.py` — Multi-factor scoring across all strategies
@@ -88,7 +100,14 @@ real data and found to have no edge.
 - `render_qullamaggie()` in `dashboard.py` — Kristjan Kullamägi's setups: Breakout (momentum-leader
   flag continuation, opening-range-breakout proxy on daily bars) and Episodic Pivot (gap on catalyst).
   Scores each name on his checklist; outputs entry (pivot / gap-day high), stop (breakout-day low),
-  1R target, and risk-based position size. No standalone module — inline like `render_parabolic_short`.
+  1R target, and risk-based position size. No standalone module (inline in dashboard.py).
+- `smallcap_momentum_module.py` — Streamlit page for Trader YC's small-cap day-trading method
+  (youtube.com/watch?v=9PdfWdoyxxM). Logic lives in `strategies/smallcap_momentum_yc/` (package,
+  relative imports — run its CLIs as `python -m strategies.smallcap_momentum_yc.<scanner|heat|replay|monitor>`).
+  Alerts only, cash-only sizing (shorts alert-only). Scan cache `Data/smallcap_momentum/latest_scan.json`,
+  heat history `strategies/smallcap_momentum_yc/data/heat_history.json`, Polygon grouped-daily cache
+  `strategies/smallcap_momentum_yc/data/grouped/`. Pre-market (4:00–9:30 ET) the scan uses Yahoo batch
+  pre-market quotes, not the Yahoo screener (which still shows yesterday's session then).
 - `astro_scanner.py` — Financial astrology / Gann timing
 - `economic_calendar.py` — Macro events calendar and news feed
 - `stock_analyzer_module.py` — Deep multi-framework analysis on a single ticker
