@@ -34,9 +34,16 @@ _RULES = """
 3. **IV filter:** enter only when **implied vol is below its 1-year median** — calendars are long
    vega, a rising IV widens the profit tent. Don't enter with IV at the top of its range.
 4. **No earnings** before the long leg expires — the IV crush hurts the long leg.
-5. **Exits:** no stop (size small). **Scale out** as it rises — e.g. 1 of 10 at +25%, 1 at +50%,
-   2 at +100%, 3 at +200%. **Close before the short leg expires** (assignment risk).
-6. **PASS** needs: IV below 1-yr median · no earnings before the back expiry · positive debit ·
+5. **When to buy:** any session the setup shows **PASS**, near the close (after 15:30 ET, when quotes
+   are tightest). No weekday is special — Mon–Thu all work; Friday is the one to skip if you must pick.
+   Work a limit near the **mid**; don't pay the natural price.
+6. **Hold period:** **hold until the "close by" date** — the session before the short leg expires
+   (~4–5 weeks). A calendar earns most of its value in the **last week**, when the short decays fastest,
+   so closing after a week or two gives most of it up. Optional: close early if it reaches
+   **+50%** of the debit. **No stop** — the debit is the max loss, size it small. Always be out before
+   the short expires (assignment risk).
+7. **One at a time** per symbol: a new calendar on the same name only after the last one is closed.
+8. **PASS** needs: IV below 1-yr median · no earnings before the back expiry · positive debit ·
    back leg 7 ± 2 days after the short · each leg's bid/ask ≤ 10% of mid.
 
 *Expected move = 0.85 × ATM front straddle (the broker-style number). IV history = the stock's own
@@ -47,12 +54,12 @@ _VIEWS = {"All": None, "Neutral (ATM)": "Neutral", "Bullish (call +EM)": "Bullis
           "Bearish (put −EM)": "Bearish", "Double": "Double"}
 
 _COLS = ["tier", "symbol", "variant", "legs", "dte_front", "debit_mid", "debit_natural", "max_loss",
-         "max_profit_est", "reward_risk", "peak_at", "pnl_at_spot", "breakeven", "scale_out_at", "close_by", "fails"]
+         "max_profit_est", "reward_risk", "peak_at", "pnl_at_spot", "breakeven", "take_profit_at", "close_by", "fails"]
 _LABELS = {"dte_front": "DTE", "debit_mid": "debit $ (mid)", "debit_natural": "debit $ (natural)",
            "max_loss": "max loss $", "max_profit_est": "max profit $ (model)", "reward_risk": "reward : risk",
            "peak_at": "peak at", "pnl_at_spot": "P&L $ if price unchanged (model)",
            "breakeven": "profit zones (model)", "scale_out_at": "scale out at $ value",
-           "close_by": "close by"}
+           "take_profit_at": "optional TP at $ value", "close_by": "close by (hold until)"}
 
 
 def _tier_style(v):
@@ -132,7 +139,8 @@ def render_calendar_em():
         sub = sub[sub.tier == "PASS"]
     n_pass = int((df.tier == "PASS").sum())
     st.caption(f"**{n_pass} PASS** · {len(df) - n_pass} WATCH across {df.symbol.nunique()} symbols · "
-               "ranked by IV percentile (lowest first). *Model* columns = value at the short expiry with "
+               "ranked by IV percentile (lowest first). **Buy:** any PASS day near the close at ~mid · "
+               "**Hold:** until the *close by* date (~4–5 weeks). *Model* columns = value at the short expiry with "
                "the long leg at today's IV, like the broker's P&L curve — not a forecast. A double calendar has two profit zones with a losing dip between them.")
     if sub.empty:
         st.info("Nothing passes right now in this view — switch off **PASS only** to see the WATCH setups "
