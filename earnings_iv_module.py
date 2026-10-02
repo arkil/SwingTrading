@@ -277,11 +277,11 @@ def _quote(df, K, spot, iv, T, is_call):
             return 0.0
     row = df[df["strike"] == K]
     if row.empty:
-        return theo, "model", False, {"oi": 0, "vol": 0}
+        return theo, "model", False, {"oi": 0, "vol": 0, "ba": None}
     r = row.iloc[0]
     b, a, lp = _f(r.get("bid")), _f(r.get("ask")), _f(r.get("lastPrice"))
     oi, vol = _f(r.get("openInterest")), _f(r.get("volume"))
-    info = {"oi": int(oi), "vol": int(vol)}
+    info = {"oi": int(oi), "vol": int(vol), "ba": (a - b) if (b > 0 and a >= b) else None}
     if b > 0 and a > 0:
         mid = (b + a) / 2.0
         spread_ok = (a - b) <= max(0.15, 0.5 * mid)          # not a >1.5x-wide market
@@ -302,7 +302,7 @@ def _mid(df, K, spot, iv, T, is_call):
 def _qleg(action, df, K, right, spot, iv, T):
     px, src, liq, info = _quote(df, K, spot, iv, T, right == "C")
     return {"action": action, "strike": float(K), "right": right, "px": round(px, 2),
-            "src": src, "liquid": bool(liq), "oi": info["oi"], "vol": info["vol"],
+            "src": src, "liquid": bool(liq), "oi": info["oi"], "vol": info["vol"], "ba": info["ba"],
             "label": f"{action} {K:g}{right}"}
 
 
@@ -396,6 +396,148 @@ def _debit_spread(calls, puts, spot, iv, T, bullish):
     out = _finish(name, legs, "debit", debit, be_fn(debit), float("nan"))
     out["max_profit"] = width - debit
     return out
+
+
+# ── Risk/reward optimizer for the earnings credit structures ────────────────
+# The option chain's own probabilities are break-even by construction (mid
+# prices ARE the risk-neutral expectation), so "POP" from IV can't tell a good
+# strike pair from a bad one. The edge is the implied move being rich vs the
+# stock's history — so price every candidate pair against the REAL-world
+# distribution: the stock's own past earnings gaps (both directions) on top of
+# ordinary realized-vol diffusion to expiry. Then keep the pair with the best
+# expected return on risk, after slippage, that also survives a tail stress.
+_STRESS = 1.5        # stress case: the next print is 1.5x this name's typical gaps
+_MIN_CW = 0.20       # credit ≥ 20% of width → never risk more than 4 to make 1
+_MIN_ROR = 0.05      # expected profit ≥ 5% of max loss — thinner edges die to model error
+
+
+def _real_forwards(spot, hmoves, earn_move, scale=1.0):
+    jumps = [m * scale / 100.0 for m in (hmoves or [])]
+    if len(jumps) < 4 and earn_move:            # thin history → blend in the implied move
+        jumps += [earn_move * scale / 100.0] * (4 - len(jumps))
+    if not jumps:
+        return None
+    j = np.array(jumps)
+    return spot * np.concatenate([1.0 + j, 1.0 - j])
+
+
+def _blk(F, K, sig, is_call):
+    """Undiscounted Black price, vectorised over forwards F."""
+    F = np.asarray(F, dtype=float)
+    if sig <= 0:
+        return np.maximum(F - K, 0.0) if is_call else np.maximum(K - F, 0.0)
+    d1 = (np.log(F / K) + 0.5 * sig * sig) / sig
+    d2 = d1 - sig
+    if is_call:
+        return F * _ncdf_arr(d1) - K * _ncdf_arr(d2)
+    return K * _ncdf_arr(-d2) - F * _ncdf_arr(-d1)
+
+
+def _exp_loss(F, sig, s, l, is_call):
+    """E[spread payout owed] for short s / long l under the jump mixture."""
+    return float(np.mean(_blk(F, s, sig, is_call) - _blk(F, l, sig, is_call)))
+
+
+def _p_breach(F, sig, s, is_call):
+    if sig <= 0:
+        return float(np.mean(F > s if is_call else F < s))
+    d2 = (np.log(F / s) - 0.5 * sig * sig) / sig
+    return float(np.mean(_ncdf_arr(d2) if is_call else _ncdf_arr(-d2)))
+
+
+def _slip(leg):
+    """Expected give-up vs mid when legging in: ¼ of the market, or a guess if no market."""
+    return 0.25 * leg["ba"] if leg.get("ba") else max(0.05, 0.10 * leg["px"])
+
+
+def _side_candidates(df, spot, iv, T, is_call, F, Fs, sig, sig_s, max_steps=4,
+                     dmin=0.06, dmax=0.40):
+    strikes = np.sort(df["strike"].unique().astype(float))
+    out = []
+    for i, s in enumerate(strikes):
+        d = abs(bs_delta(spot, s, T, iv, is_call))
+        if not (dmin <= d <= dmax):
+            continue
+        sh = _qleg("SELL", df, s, "C" if is_call else "P", spot, iv, T)
+        if not sh["liquid"]:
+            continue
+        wings = strikes[i + 1:i + 1 + max_steps] if is_call else strikes[max(0, i - max_steps):i][::-1]
+        for l in wings:
+            if abs(l - s) > 0.10 * spot:
+                break
+            lg = _qleg("BUY", df, l, "C" if is_call else "P", spot, iv, T)
+            if lg["src"] == "model":
+                continue
+            credit = sh["px"] - lg["px"] - _slip(sh) - _slip(lg)
+            width = abs(l - s)
+            if credit <= 0.05 or credit >= width:
+                continue
+            el = _exp_loss(F, sig, s, l, is_call)
+            # two separate stresses, the worse one counts: 1.5x gaps, or market-priced drift
+            els = max(_exp_loss(Fs, sig, s, l, is_call), _exp_loss(F, sig_s, s, l, is_call))
+            out.append({"legs": [sh, lg], "s": s, "l": l, "width": width, "credit": credit,
+                        "el": el, "els": els, "pb": _p_breach(F, sig, s, is_call),
+                        "mid_credit": sh["px"] - lg["px"]})
+    return out
+
+
+def _optimize_credit(calls, puts, spot, ivc, ivp, T, hmoves, earn_move, rv, rv_stress):
+    """Search bull-put, bear-call and iron-condor strike/width combos; return
+    (strat, None) for the max expected-return-on-risk one that clears the
+    filters, or (None, why). Must break even under BOTH stresses separately:
+    1.5x gaps, and ex-event drift at `rv_stress` (back-month IV) instead of
+    trailing realized vol."""
+    F, Fs = _real_forwards(spot, hmoves, earn_move), _real_forwards(spot, hmoves, earn_move, _STRESS)
+    if F is None:
+        return None, "no earnings-move history to price against"
+    t_ex = math.sqrt(max(T - 1 / 365, 1 / 365))
+    sig, sig_s = (rv or 0.0) * t_ex, max(rv or 0.0, rv_stress or 0.0) * t_ex
+    cs = _side_candidates(calls, spot, ivc, T, True, F, Fs, sig, sig_s)
+    ps = _side_candidates(puts, spot, ivp, T, False, F, Fs, sig, sig_s)
+
+    combos = []   # (sides, credit, max_loss, ev, ev_stress, pop, kind)
+    for x, kind in [(c, "call") for c in cs] + [(p, "put") for p in ps]:
+        combos.append(([x], x["credit"], x["width"] - x["credit"], x["credit"] - x["el"],
+                       x["credit"] - x["els"], 1 - x["pb"], kind))
+    for c in cs:
+        for p in ps:
+            if p["s"] >= c["s"]:
+                continue
+            credit = c["credit"] + p["credit"]
+            ml = max(c["width"], p["width"]) - credit
+            if ml <= 0:
+                continue
+            combos.append(([p, c], credit, ml, credit - c["el"] - p["el"],
+                           credit - c["els"] - p["els"], 1 - c["pb"] - p["pb"], "condor"))
+    n_all = len(combos)
+    if not combos:
+        return None, "no liquid strike pair leaves a credit after slippage"
+    ok = [c for c in combos if c[1] / (c[1] + c[2]) >= _MIN_CW and c[3] / c[2] >= _MIN_ROR
+          and c[4] >= 0]
+    if not ok:
+        n_rr = sum(c[1] / (c[1] + c[2]) >= _MIN_CW for c in combos)
+        n_ev = sum(c[1] / (c[1] + c[2]) >= _MIN_CW and c[3] / c[2] >= _MIN_ROR for c in combos)
+        return None, (f"of {n_all} strike/width pairs, {n_rr} risk ≤ 4:1, {n_ev} of those expect "
+                      f"≥{_MIN_ROR*100:.0f}% on risk, 0 survive the stress tests (1.5× gaps / "
+                      f"back-month vol)")
+    sides, credit, ml, ev, evs, pop, side = max(ok, key=lambda c: c[3] / c[2])
+
+    legs = [l for x in sides for l in x["legs"]]
+    if side == "condor":
+        p, c = sides
+        name = "Iron Condor — optimized IV-crush play"
+        be = [p["s"] - credit, c["s"] + credit]
+    elif side == "call":
+        c = sides[0]
+        name, be = "Bear Call Credit Spread — optimized IV-crush", [c["s"] + credit]
+    else:
+        p = sides[0]
+        name, be = "Bull Put Credit Spread — optimized IV-crush", [p["s"] - credit]
+    out = _finish(name, legs, "credit", ml, be, pop)
+    out.update({"net": credit, "max_profit": credit, "ev": ev, "ev_stress": evs,
+                "ror_exp": ev / ml, "n_tested": n_all, "n_pass": len(ok), "side": side,
+                "mid_credit": sum(x["mid_credit"] for x in sides)})
+    return out, None
 
 
 def _payoff_fig(strat, spot, lo, hi, dark=False):
@@ -614,20 +756,23 @@ def _analyze_impl(symbol: str, live: bool = False) -> dict:
                        f"likely a stale/duplicate data row. Verify the date with the company before trading.")
     elif rich >= sell_bar:  # implied move is genuinely rich (move_ok) and no tail_risk
         strength = "strong edge" if rich >= 3 else "moderate — size small"
-        # shorts a touch further OTM when the implied move is only modestly rich
-        sd = 0.16 if move_ratio >= 1.15 else 0.12
-        if lean == "bullish":
-            verdict = f"SELL PREMIUM ({strength}) — bullish tilt"
-            strat = _credit_spread(fc, fp, spot, ivp, T_front, bullish=True, short_delta=sd + 0.06)
-            reasons.append("→ Bull Put credit spread: collect the fat put premium, room below for the drift.")
-        elif lean == "bearish":
-            verdict = f"SELL PREMIUM ({strength}) — bearish tilt"
-            strat = _credit_spread(fc, fp, spot, ivc, T_front, bullish=False, short_delta=sd + 0.06)
-            reasons.append("→ Bear Call credit spread: sell the rich calls, room above for the drift.")
+        strat, why = _optimize_credit(fc, fp, spot, ivc, ivp, T_front, hmoves, earn_move, rv20, back_iv)
+        if strat is None:
+            verdict = "STAND ASIDE — no strike pair with acceptable risk/reward"
+            reasons.append(f"→ Edge on the vol, but {why}. Skip.")
         else:
-            verdict = f"SELL PREMIUM ({strength}) — neutral"
-            strat = _iron_condor(fc, fp, spot, ivc, ivp, T_front, short_delta=sd)
-            reasons.append(f"→ Iron Condor ({sd*100:.0f}Δ shorts): no directional read, harvest the crush both sides.")
+            tilt = {"put": "bull put", "call": "bear call", "condor": "iron condor"}[strat["side"]]
+            verdict = f"SELL PREMIUM ({strength}) — {tilt}"
+            ml, ev = strat["max_loss"], strat["ev"]
+            reasons.append(
+                f"→ {strat['name'].split(' — ')[0]}: best of {strat['n_tested']} strike/width pairs "
+                f"({strat['n_pass']} passed the risk/reward filters). Priced against this name's own past earnings gaps, "
+                f"not the option-implied odds. Chart lean: {lean} (not used to pick the side).")
+            reasons.append(
+                f"→ Credit ≈ ${strat['net']:.2f} after slippage (mid ${strat['mid_credit']:.2f}) vs "
+                f"${ml*100:.0f}/lot max loss (risk {ml/strat['net']:.1f}:1) · history-based POP {strat['pop']*100:.0f}% · "
+                f"expected +${ev*100:.0f}/lot = {strat['ror_exp']*100:+.0f}% on risk · "
+                f"worst stress case: ${strat['ev_stress']*100:+.0f}/lot.")
     elif rich >= 2:  # edge is there but regime gate held it back
         verdict = f"STAND ASIDE — score {rich:.0f} but {regime_label} regime (need ≥{sell_bar:.0f} to sell vol)"
         reasons.append(f"→ {regime_note or regime_label}. Short-vol entries are gated higher in this "
@@ -1383,9 +1528,9 @@ def _render_scanner(bias: str = "neutral"):
         if hide_bad_date_ and "Date?" in v.columns:
             v = v[~v["Date?"].astype(str).str.contains("check")]
         if bias_ == "bearish":
-            v = v[~v["Signal"].str.contains("bullish tilt")]
+            v = v[~v["Signal"].str.contains("bullish tilt|bull put")]
         elif bias_ == "bullish":
-            v = v[~v["Signal"].str.contains("bearish tilt")]
+            v = v[~v["Signal"].str.contains("bearish tilt|bear call")]
         if only_act_:
             v = v[v["_act"]]
         return (v.sort_values(["_act", "_conv"], ascending=[False, False])
@@ -1563,20 +1708,20 @@ def _premium_impl(symbol: str, dte_target: int = 35, short_delta: float = 0.20,
         spot = _fresh_spot(symbol) or spot
 
     now = pd.Timestamp.now(tz="UTC")
-    # Prefer the standard monthly expiry (3rd Friday) in the 20–55 DTE window —
+    # Prefer the standard monthly expiry (3rd Friday) in the 20–60 DTE window —
     # that's where option open interest / liquidity concentrates. Fall back to
     # the nearest weekly to the target only if no monthly is in range.
     cand, monthlies = [], []
     for e in expiries:
         et = pd.Timestamp(e)
         d = (et.tz_localize("UTC") - now).days
-        if 20 <= d <= 55:
+        if 20 <= d <= 60:
             cand.append((abs(d - dte_target), e, d))
             if et.weekday() == 4 and 15 <= et.day <= 21:      # 3rd Friday
                 monthlies.append((abs(d - dte_target), e, d))
     pool = monthlies or cand
     if not pool:
-        return {"symbol": symbol, "skip": "no expiry in 20–55 DTE"}
+        return {"symbol": symbol, "skip": "no expiry in 20–60 DTE"}
     _, exp, dte = min(pool)
     exp_ts = pd.Timestamp(exp).tz_localize("UTC")
 
