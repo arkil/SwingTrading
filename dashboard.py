@@ -22,6 +22,19 @@ import os
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+# `kill -USR1 <pid>` writes every thread's stack to logs/thread_dump.log (py-spy needs root on
+# macOS). Registered once per process; the script body re-runs on every page load.
+if not getattr(sys, "_dashboard_faulthandler", None):
+    try:
+        import faulthandler as _fh
+        import signal as _signal
+        os.makedirs(os.path.join(os.path.dirname(__file__), "logs"), exist_ok=True)
+        sys._dashboard_faulthandler = open(
+            os.path.join(os.path.dirname(__file__), "logs", "thread_dump.log"), "a")
+        _fh.register(_signal.SIGUSR1, file=sys._dashboard_faulthandler, all_threads=True)
+    except Exception:
+        pass
+
 # Load .env so ALPACA_API_KEY / ALPACA_SECRET_KEY are available without manual export
 _env_file = os.path.join(os.path.dirname(__file__), ".env")
 if os.path.exists(_env_file):
@@ -50,6 +63,8 @@ from typing import Optional
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import yfinance as yf
+import yf_safe
+yf_safe.install()  # serialize + chunk multi-ticker yf.download; unbounded threads crashed the server
 from datetime import datetime, timedelta
 from collections import Counter
 import pytz
